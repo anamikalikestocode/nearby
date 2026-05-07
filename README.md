@@ -18,9 +18,9 @@ I kept checking Find My like a psychopath. So I automated it.
 
 ## Install
 
-**[Download nearby](https://github.com/anamikalikestocode/nearby/releases/latest/download/Nearby.zip)** (136 KB)
+**[Download nearby](https://github.com/anamikalikestocode/nearby/releases/latest/download/Nearby.zip)** (144 KB)
 
-Unzip, drag to Applications, open. That's it.
+Unzip, drag to Applications, **right-click → Open** on first launch (macOS blocks unsigned apps once — this is normal). That's it.
 
 <details>
 <summary>Or build from source</summary>

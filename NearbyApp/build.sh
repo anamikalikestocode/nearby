@@ -10,6 +10,9 @@ swift build -c release
 echo "Packaging app bundle..."
 cp .build/release/NearbyApp Nearby.app/Contents/MacOS/Nearby
 
+echo "Signing..."
+codesign --force --deep -s - Nearby.app
+
 # Create zip for GitHub Releases
 cd Nearby.app/..
 rm -f Nearby.zip
