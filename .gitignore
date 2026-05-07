@@ -5,3 +5,7 @@ __pycache__/
 state.json
 config.json
 friends.json
+locator
+nearbyd
+Locator.app/
+location.txt
