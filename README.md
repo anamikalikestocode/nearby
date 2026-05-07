@@ -18,9 +18,11 @@ I kept checking Find My like a psychopath. So I automated it.
 
 ## Install
 
-**[Download nearby](https://github.com/anamikalikestocode/nearby/releases/latest/download/Nearby.zip)** (144 KB)
+```bash
+curl -sL https://github.com/anamikalikestocode/nearby/releases/latest/download/Nearby.zip -o /tmp/Nearby.zip && unzip -qo /tmp/Nearby.zip -d /Applications && xattr -cr /Applications/Nearby.app && open /Applications/Nearby.app
+```
 
-Unzip, drag to Applications, **right-click → Open** on first launch (macOS blocks unsigned apps once — this is normal). That's it.
+One command. Downloads, installs, opens. No Gatekeeper warning.
 
 <details>
 <summary>Or build from source</summary>
