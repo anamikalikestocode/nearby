@@ -230,6 +230,11 @@ def main():
         log("❌ Run install.sh first — no config or friends found")
         return
 
+    if not CACHE_DIR.exists() or not any(CACHE_DIR.glob("*.record")):
+        log("⚠️  Can't read Find My data — python3 may need Full Disk Access")
+        log("   Fix: System Settings → Privacy & Security → Full Disk Access → add /usr/bin/python3")
+        return
+
     my_lat, my_lon = get_my_location()
     if my_lat is None:
         return

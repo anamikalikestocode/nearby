@@ -41,7 +41,7 @@ I kept checking Find My like a psychopath. So I automated it.
 curl -sL https://raw.githubusercontent.com/anamikalikestocode/nearby/main/install.sh | bash
 ```
 
-Takes ~30 seconds. You'll click **Allow** on one popup (Keychain access), enter your iMessage address, and pick an alert radius. That's it — it's running.
+Takes ~30 seconds. If prompted, grant Full Disk Access to Terminal (the installer opens the right page and shows you what to drag). Then enter your iMessage address, pick an alert radius, and you're done.
 
 <details>
 <summary>What the install looks like</summary>
@@ -83,6 +83,7 @@ Takes ~30 seconds. You'll click **Allow** on one popup (Keychain access), enter 
 - macOS 14+ (Sonoma)
 - Signed into iCloud with Find My enabled
 - At least one person sharing their location with you via Find My
+- Full Disk Access for Terminal (the installer will prompt you if needed)
 - Python 3 (pre-installed on macOS)
 
 ## What you get

@@ -40,12 +40,65 @@ if ! xcode-select -p &>/dev/null; then
     exit 0
 fi
 
-CACHE="$HOME/Library/com.apple.icloud.searchpartyd/SecureLocationCache"
+FMDIR="$HOME/Library/com.apple.icloud.searchpartyd"
+CACHE="$FMDIR/SecureLocationCache"
 if [ ! -d "$CACHE" ]; then
-    echo -e "  ${red}✗ Find My data not found.${reset}"
-    echo -e "  ${dim}Make sure you're signed into iCloud with Find My enabled,${reset}"
-    echo -e "  ${dim}and at least one person shares their location with you.${reset}"
-    exit 1
+    if [ -d "$HOME/Library" ] && ! ls "$FMDIR" &>/dev/null; then
+        # Detect which terminal app is running
+        TERM_APP=""
+        TERM_NAME="your terminal app"
+        if [ -n "${TERM_PROGRAM:-}" ]; then
+            case "$TERM_PROGRAM" in
+                Apple_Terminal) TERM_APP="/System/Applications/Utilities/Terminal.app"; TERM_NAME="Terminal" ;;
+                iTerm.app) TERM_APP="/Applications/iTerm.app"; TERM_NAME="iTerm" ;;
+                ghostty) TERM_APP="/Applications/Ghostty.app"; TERM_NAME="Ghostty" ;;
+                WarpTerminal) TERM_APP="/Applications/Warp.app"; TERM_NAME="Warp" ;;
+                vscode) TERM_APP="/Applications/Visual Studio Code.app"; TERM_NAME="VS Code" ;;
+                *) TERM_APP="" ;;
+            esac
+        fi
+
+        echo -e "  ${yellow}Full Disk Access needed to read Find My data.${reset}"
+        if [ -n "$TERM_APP" ] && [ -e "$TERM_APP" ]; then
+            echo -e "  ${dim}Opening System Settings — click ${bold}+${reset}${dim}, then drag ${bold}${TERM_NAME}${reset}${dim} from the Finder window into the list.${reset}"
+        else
+            echo -e "  ${dim}Opening System Settings — click ${bold}+${reset}${dim} and add your terminal app to the list.${reset}"
+        fi
+        echo ""
+        open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" 2>/dev/null
+        sleep 1
+        if [ -n "$TERM_APP" ] && [ -e "$TERM_APP" ]; then
+            open -R "$TERM_APP" 2>/dev/null
+        fi
+        echo -e -n "  Waiting for access..."
+        for i in $(seq 1 60); do
+            if ls "$FMDIR" &>/dev/null; then
+                echo ""
+                echo -e "  ${green}✓${reset} Full Disk Access granted"
+                break
+            fi
+            sleep 2
+        done
+        if ! ls "$FMDIR" &>/dev/null; then
+            echo ""
+            echo -e "  ${red}✗ Still can't access Find My data.${reset}"
+            echo -e "  ${dim}Enable Terminal in Full Disk Access, then re-run this command.${reset}"
+            exit 1
+        fi
+        # Re-check after access granted
+        CACHE="$FMDIR/SecureLocationCache"
+        if [ ! -d "$CACHE" ]; then
+            echo -e "  ${red}✗ Find My data not found.${reset}"
+            echo -e "  ${dim}Make sure you're signed into iCloud with Find My enabled,${reset}"
+            echo -e "  ${dim}and at least one person shares their location with you.${reset}"
+            exit 1
+        fi
+    else
+        echo -e "  ${red}✗ Find My data not found.${reset}"
+        echo -e "  ${dim}Make sure you're signed into iCloud with Find My enabled,${reset}"
+        echo -e "  ${dim}and at least one person shares their location with you.${reset}"
+        exit 1
+    fi
 fi
 
 COUNT=$(find "$CACHE" -maxdepth 1 -name "*.record" 2>/dev/null | wc -l | tr -d ' ')
@@ -189,6 +242,15 @@ echo -e -n "  ${bold}Your iMessage email or phone${reset} (to text yourself aler
 read IMESSAGE < /dev/tty
 if [ -z "$IMESSAGE" ]; then
     echo -e "  ${dim}Skipping iMessage — you'll still get macOS notifications${reset}"
+else
+    # Trigger Automation permission for Messages.app now (while Terminal is in foreground)
+    # so the background daemon can send iMessages later without a popup
+    echo -e "  ${dim}Connecting to iMessage...${reset}"
+    if ! osascript -e 'tell application "Messages" to name' &>/dev/null; then
+        echo -e "  ${yellow}!${reset} Click ${bold}Allow${reset} on the popup to let nearby send you texts"
+        osascript -e 'tell application "Messages" to name' 2>/dev/null
+    fi
+    echo -e "  ${green}✓${reset} iMessage ready"
 fi
 
 # ── Ask for radius ──────────────────────────────────────────────────────────
