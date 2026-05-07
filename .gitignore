@@ -1,12 +1,8 @@
-__pycache__/
-*.pyc
 .DS_Store
 *.log
-state.json
-config.json
-friends.json
-locator
-nearbyd
-Locator.app/
-location.txt
 Screenshot*
+
+# Swift build artifacts
+NearbyApp/.build/
+NearbyApp/Nearby.app/Contents/MacOS/Nearby
+NearbyApp/Nearby.zip
