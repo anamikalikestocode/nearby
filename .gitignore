@@ -1,8 +1,20 @@
 .DS_Store
 *.log
 Screenshot*
+sender.pid
+sender.log
 
 # Swift build artifacts
 NearbyApp/.build/
-NearbyApp/Nearby.app/Contents/MacOS/Nearby
+NearbyApp/Nearby.app/Contents/MacOS/
+NearbyApp/Nearby.app/Contents/Resources/
+NearbyApp/Nearby.app/Contents/CodeResources
+NearbyApp/Nearby.app/Contents/_CodeSignature/
 NearbyApp/Nearby.zip
+
+# DMG build outputs
+*.dmg
+NearbyApp/Nearby.dmg
+
+# Claude Code
+.claude/

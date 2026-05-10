@@ -18,11 +18,15 @@ I kept checking Find My like a psychopath. So I automated it.
 
 ## Install
 
+**[Download Nearby.dmg](https://github.com/anamikalikestocode/nearby/releases/latest/download/Nearby.dmg)** — open it, drag to Applications, done.
+
+<details>
+<summary>Or install from the terminal</summary>
+
 ```bash
 curl -sL https://github.com/anamikalikestocode/nearby/releases/latest/download/Nearby.zip -o /tmp/Nearby.zip && unzip -qo /tmp/Nearby.zip -d /Applications && xattr -cr /Applications/Nearby.app && open /Applications/Nearby.app
 ```
-
-One command. Downloads, installs, opens. No Gatekeeper warning.
+</details>
 
 <details>
 <summary>Or build from source</summary>

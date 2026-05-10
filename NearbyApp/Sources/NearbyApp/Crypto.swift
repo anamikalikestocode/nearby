@@ -71,6 +71,9 @@ struct Crypto {
         }
 
         // CommonCrypto supports arbitrary nonce sizes (handles Apple's 16-byte nonces)
+        guard !key.isEmpty, !nonce.isEmpty, !ciphertext.isEmpty, !tag.isEmpty else {
+            throw CryptoError.invalidRecord
+        }
         var plaintext = Data(count: ciphertext.count)
         let status = plaintext.withUnsafeMutableBytes { ptBuf in
             key.withUnsafeBytes { keyBuf in

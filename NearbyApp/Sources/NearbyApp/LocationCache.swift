@@ -21,14 +21,43 @@ struct LocationCache {
     static var ownedBeacons: URL { baseDir.appendingPathComponent("OwnedBeacons") }
     static var sharedKeys: URL { baseDir.appendingPathComponent("SecureLocationSharedKeys") }
 
-    /// Check if we can access the Find My data directory.
+    /// Check if we can actually read Find My data (not just the directory).
+    /// Tests both directory listing and reading an actual .record file.
     static func canAccessFindMyData() -> Bool {
-        return FileManager.default.isReadableFile(atPath: secureLocationCache.path)
+        guard FileManager.default.isReadableFile(atPath: secureLocationCache.path) else {
+            return false
+        }
+        // Also verify we can list contents — catches partial FDA revocation
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: secureLocationCache, includingPropertiesForKeys: nil
+        ) else {
+            return false
+        }
+        // Try to read at least one .record file to confirm real access
+        if let firstRecord = contents.first(where: { $0.pathExtension == "record" }) {
+            return (try? Data(contentsOf: firstRecord)) != nil
+        }
+        // Directory exists and is listable but empty — still counts as access
+        return true
     }
 
+    /// Maximum age for friend locations — discard if older than this.
+    /// Apple's searchpartyd updates friend locations every 5-15 min typically.
+    static let maxFriendLocationAge: TimeInterval = 1800  // 30 min
+
+    /// Maximum age for your own iPhone GPS.
+    /// searchpartyd updates your own device GPS less frequently (sometimes 1-2 hours).
+    /// 3 hours balances freshness vs. availability — stale enough to be wrong means
+    /// we'd rather skip than send a bogus alert.
+    static let maxOwnLocationAge: TimeInterval = 10800  // 3 hours
+
     /// Read and decrypt all friend locations from SecureLocationCache.
-    static func decryptFriendLocations(key: Data) -> [String: (Double, Double)] {
-        var locations: [String: (Double, Double)] = [:]
+    /// When multiple records exist for the same friend, keeps the most recent.
+    /// Discards locations older than `maxLocationAge`.
+    static func decryptFriendLocations(key: Data) -> [String: (lat: Double, lon: Double, age: Int)] {
+        var locations: [String: (lat: Double, lon: Double, age: Int)] = [:]
+        var timestamps: [String: Double] = [:]  // track best timestamp per friend
+        let now = Date().timeIntervalSince1970
         guard let records = try? FileManager.default.contentsOfDirectory(
             at: secureLocationCache, includingPropertiesForKeys: nil
         ) else { return locations }
@@ -41,12 +70,34 @@ struct LocationCache {
                   let lon = secureLoc["longitude"] as? Double,
                   lat != 0, lon != 0
             else { continue }
-            locations[fmid] = (lat, lon)
+
+            // Extract timestamp — keep only the most recent location per friend
+            var ts: Double = 0
+            if let date = secureLoc["timestamp"] as? Date {
+                ts = date.timeIntervalSince1970
+            } else if let unix = secureLoc["timestamp"] as? Double {
+                ts = unix
+            } else if let str = secureLoc["timestamp"] as? String, let d = Double(str) {
+                ts = d
+            }
+
+            // Skip stale friend data
+            if ts > 0 && (now - ts) > maxFriendLocationAge {
+                continue
+            }
+
+            let existing = timestamps[fmid] ?? 0
+            if ts >= existing {
+                let ageMinutes = ts > 0 ? Int((now - ts) / 60) : 0
+                locations[fmid] = (lat: lat, lon: lon, age: ageMinutes)
+                timestamps[fmid] = ts
+            }
         }
         return locations
     }
 
     /// Get your iPhone's GPS location from BeaconEstimatedLocation.
+    /// Returns nil if the most recent location is older than `maxLocationAge`.
     static func getMyLocation(deviceId: String, key: Data) -> (Double, Double)? {
         let deviceDir = beaconEstimatedLocation.appendingPathComponent(deviceId)
         guard FileManager.default.isDirectory(deviceDir) else { return nil }
@@ -54,6 +105,7 @@ struct LocationCache {
             at: deviceDir, includingPropertiesForKeys: nil
         ) else { return nil }
 
+        let now = Date().timeIntervalSince1970
         var bestTs: Double = 0
         var bestLat: Double?
         var bestLon: Double?
@@ -79,6 +131,11 @@ struct LocationCache {
                 bestLat = lat
                 bestLon = lon
             }
+        }
+
+        // Reject very stale GPS — searchpartyd updates own device infrequently
+        if bestTs > 0 && (now - bestTs) > maxOwnLocationAge {
+            return nil
         }
 
         if let lat = bestLat, let lon = bestLon {
