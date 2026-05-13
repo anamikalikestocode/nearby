@@ -77,7 +77,15 @@ struct ProximityChecker {
         // Get friend locations
         let locations = LocationCache.decryptFriendLocations(key: key)
         if locations.isEmpty {
-            logs.append("[\(ts)] No locations found in cache")
+            // Distinguish between "no data at all" and "data exists but all stale"
+            let rawCount = (try? FileManager.default.contentsOfDirectory(
+                at: LocationCache.secureLocationCache, includingPropertiesForKeys: nil
+            ))?.filter({ $0.pathExtension == "record" }).count ?? 0
+            if rawCount > 0 {
+                logs.append("[\(ts)] ⚠️ \(rawCount) location records exist but all are older than 30 min — is Find My syncing?")
+            } else {
+                logs.append("[\(ts)] No location records found in cache")
+            }
             return logs
         }
 

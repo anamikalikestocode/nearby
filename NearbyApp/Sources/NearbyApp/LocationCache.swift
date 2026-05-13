@@ -224,13 +224,20 @@ struct LocationCache {
     }
 
     /// Detect the user's iPhone from OwnedBeacons.
+    /// Prefers the phone with the most recent GPS data, falling back to most recent pairing date.
     static func detectiPhone(key: Data) -> (identifier: String, model: String)? {
         guard FileManager.default.isDirectory(ownedBeacons) else { return nil }
         guard let records = try? FileManager.default.contentsOfDirectory(
             at: ownedBeacons, includingPropertiesForKeys: nil
         ) else { return nil }
 
-        var phones: [(pairingDate: String, identifier: String, model: String)] = []
+        struct PhoneCandidate {
+            let identifier: String
+            let model: String
+            let pairingDate: Date?
+            let latestGPSAge: TimeInterval?  // seconds since most recent GPS record
+        }
+        var candidates: [PhoneCandidate] = []
 
         for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
             where record.pathExtension == "record" {
@@ -239,17 +246,52 @@ struct LocationCache {
                   let ident = parsed["identifier"] as? String,
                   model.contains("iPhone")
             else { continue }
-            let hasLocation = FileManager.default.isDirectory(
-                beaconEstimatedLocation.appendingPathComponent(ident)
-            )
-            guard hasLocation else { continue }
-            let pairingDate = (parsed["pairingDate"] as? Date).map { "\($0)" } ?? ""
-            phones.append((pairingDate, ident, model))
+
+            let locDir = beaconEstimatedLocation.appendingPathComponent(ident)
+            guard FileManager.default.isDirectory(locDir) else { continue }
+
+            // Check how recent the GPS data is for this device
+            var latestGPSAge: TimeInterval?
+            if let locRecords = try? FileManager.default.contentsOfDirectory(
+                at: locDir, includingPropertiesForKeys: [.contentModificationDateKey]
+            ) {
+                let now = Date()
+                let newestMod = locRecords.compactMap { url -> Date? in
+                    try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+                }.max()
+                if let newest = newestMod {
+                    latestGPSAge = now.timeIntervalSince(newest)
+                }
+            }
+
+            let pairingDate = parsed["pairingDate"] as? Date
+            candidates.append(PhoneCandidate(
+                identifier: ident, model: model,
+                pairingDate: pairingDate, latestGPSAge: latestGPSAge
+            ))
         }
 
-        guard !phones.isEmpty else { return nil }
-        phones.sort { $0.pairingDate > $1.pairingDate }
-        return (phones[0].identifier, phones[0].model)
+        guard !candidates.isEmpty else { return nil }
+
+        // Sort: prefer phone with most recent GPS data, then most recent pairing
+        candidates.sort { a, b in
+            // If one has GPS data and the other doesn't, prefer the one with data
+            switch (a.latestGPSAge, b.latestGPSAge) {
+            case (let ageA?, let ageB?):
+                return ageA < ageB  // smaller age = more recent
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                // Fall back to pairing date
+                let dateA = a.pairingDate ?? .distantPast
+                let dateB = b.pairingDate ?? .distantPast
+                return dateA > dateB
+            }
+        }
+
+        return (candidates[0].identifier, candidates[0].model)
     }
 }
 

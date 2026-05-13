@@ -133,29 +133,46 @@ class AppStateManager: ObservableObject {
     /// Silently launch Find My to force a GPS refresh for the user's iPhone.
     /// searchpartyd only updates BeaconEstimatedLocation when Find My is active;
     /// without this, the user's own location goes stale within minutes.
-    /// Uses NSWorkspace to launch without stealing focus from Nearby.
     private func refreshFindMyData() {
         let findMyURL = URL(fileURLWithPath: "/System/Applications/FindMy.app")
+        guard FileManager.default.fileExists(atPath: findMyURL.path) else {
+            NSLog("nearby: Find My app not found at expected path")
+            return
+        }
+
+        // Don't kill Find My if the user has it open
+        let userHasItOpen = NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == "com.apple.findmy" && !$0.isHidden
+        }
+
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false           // don't bring Find My to front
         config.addsToRecentItems = false
 
         let sem = DispatchSemaphore(value: 0)
-        NSWorkspace.shared.openApplication(at: findMyURL, configuration: config) { _, _ in
+        var launchFailed = false
+        NSWorkspace.shared.openApplication(at: findMyURL, configuration: config) { _, error in
+            if error != nil { launchFailed = true }
             sem.signal()
         }
-        sem.wait()
+        // Timeout after 10 seconds — don't block forever if Find My can't launch
+        let result = sem.wait(timeout: .now() + 10)
+        if result == .timedOut || launchFailed {
+            NSLog("nearby: Find My launch timed out or failed — skipping refresh")
+            return
+        }
 
         // Give searchpartyd time to fetch the updated location from iCloud
         Thread.sleep(forTimeInterval: 6)
 
-        // Quit Find My so it doesn't linger — use kill instead of AppleScript
-        // to avoid any activation side effects
-        let quit = Process()
-        quit.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        quit.arguments = ["-x", "FindMy"]
-        try? quit.run()
-        quit.waitUntilExit()
+        // Only quit Find My if we launched it (user didn't have it open)
+        if !userHasItOpen {
+            let quit = Process()
+            quit.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            quit.arguments = ["-x", "FindMy"]
+            try? quit.run()
+            quit.waitUntilExit()
+        }
     }
 
     func runCheck() {

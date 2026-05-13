@@ -254,15 +254,36 @@ struct SetupView: View {
         }
         DispatchQueue.global().async {
             var key: Data?
+            var lastError: Error?
             for _ in 1...3 {
-                key = try? Crypto.readBeaconKey()
-                if key != nil { break }
-                Thread.sleep(forTimeInterval: 0.5)
+                do {
+                    key = try Crypto.readBeaconKey()
+                    break
+                } catch {
+                    lastError = error
+                    Thread.sleep(forTimeInterval: 0.5)
+                }
             }
             guard let key = key else {
                 DispatchQueue.main.async {
                     isDiscovering = false
-                    status = .discoveryFailed("couldn't read Find My data — make sure you're signed into iCloud")
+                    // Give actionable error based on what actually failed
+                    if let cryptoErr = lastError as? CryptoError {
+                        switch cryptoErr {
+                        case .keyNotFound:
+                            status = .discoveryFailed("Find My encryption key not found in Keychain — make sure you're signed into iCloud with Find My enabled")
+                        case .keychainFailed(let osStatus):
+                            if osStatus == errSecUserCanceled || osStatus == errSecAuthFailed {
+                                status = .discoveryFailed("Keychain access was denied — open Keychain Access, search for \"BeaconStore\", and make sure Nearby is allowed")
+                            } else {
+                                status = .discoveryFailed("couldn't read Keychain (error \(osStatus)) — try restarting your Mac")
+                            }
+                        default:
+                            status = .discoveryFailed("couldn't decrypt Find My data — try restarting your Mac")
+                        }
+                    } else {
+                        status = .discoveryFailed("couldn't read Find My data — make sure you're signed into iCloud")
+                    }
                 }
                 return
             }
