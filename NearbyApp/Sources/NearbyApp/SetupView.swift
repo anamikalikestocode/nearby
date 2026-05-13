@@ -6,6 +6,8 @@ enum AppStatus: Equatable {
     case checking
     case needsMove
     case connectFindMy
+    case noICloud          // searchpartyd dir doesn't exist — not signed into iCloud
+    case fdaGrantedNoData  // FDA works but no friend data — Find My not set up
     case discovering(String)
     case discoveryFailed(String)
     case noFriends
@@ -17,6 +19,8 @@ enum AppStatus: Equatable {
         case (.checking, .checking),
              (.needsMove, .needsMove),
              (.connectFindMy, .connectFindMy),
+             (.noICloud, .noICloud),
+             (.fdaGrantedNoData, .fdaGrantedNoData),
              (.noFriends, .noFriends),
              (.setup, .setup),
              (.done, .done):
@@ -161,6 +165,10 @@ struct SetupView: View {
                 moveView
             case .connectFindMy:
                 findMyView
+            case .noICloud:
+                noICloudView
+            case .fdaGrantedNoData:
+                noFindMyDataView
             case .discovering(let msg):
                 loadingView(msg)
             case .discoveryFailed(let reason):
@@ -200,11 +208,37 @@ struct SetupView: View {
     private func preflight() {
         if SetupView.isInBadLocation {
             status = .needsMove
-        } else if LocationCache.canAccessFindMyData() {
-            Telemetry.trackOnboarding(step: "fda_granted")
-            discover()
-        } else {
-            status = .connectFindMy
+            return
+        }
+
+        // Retry FDA check a few times — macOS TCC can be slow to propagate
+        // after a fresh relaunch, especially on first access
+        DispatchQueue.global().async {
+            var fdaStatus = LocationCache.checkFDAStatus()
+
+            // If it looks like no FDA, retry twice with a short delay —
+            // TCC daemon can lag behind on fresh launch
+            if fdaStatus == .noFDA {
+                for _ in 1...2 {
+                    Thread.sleep(forTimeInterval: 0.5)
+                    fdaStatus = LocationCache.checkFDAStatus()
+                    if fdaStatus != .noFDA { break }
+                }
+            }
+
+            DispatchQueue.main.async {
+                switch fdaStatus {
+                case .granted:
+                    Telemetry.trackOnboarding(step: "fda_granted")
+                    discover()
+                case .noFDA:
+                    status = .connectFindMy
+                case .noFindMyDir:
+                    status = .noICloud
+                case .noFriendData:
+                    status = .fdaGrantedNoData
+                }
+            }
         }
     }
 
@@ -249,14 +283,23 @@ struct SetupView: View {
         guard !fdaPolling else { return }
         fdaPolling = true
         fdaTimer?.invalidate()
-        fdaTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            if LocationCache.canAccessFindMyData() {
+        fdaTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+            let fdaStatus = LocationCache.checkFDAStatus()
+            if fdaStatus == .granted {
                 DispatchQueue.main.async {
                     fdaTimer?.invalidate()
                     fdaTimer = nil
                     fdaPolling = false
                     Telemetry.trackOnboarding(step: "fda_granted")
                     discover()
+                }
+            } else if fdaStatus == .noFriendData || fdaStatus == .noFindMyDir {
+                // FDA was granted but there's a different problem
+                DispatchQueue.main.async {
+                    fdaTimer?.invalidate()
+                    fdaTimer = nil
+                    fdaPolling = false
+                    status = fdaStatus == .noFindMyDir ? .noICloud : .fdaGrantedNoData
                 }
             }
         }
@@ -371,10 +414,16 @@ struct SetupView: View {
                 .padding(.horizontal, 24)
 
                 ActionButton(title: isRestarting ? "restarting..." : "done — I turned it on", icon: isRestarting ? nil : "checkmark", color: DS.green, isLoading: isRestarting) {
-                    if LocationCache.canAccessFindMyData() {
+                    let fdaStatus = LocationCache.checkFDAStatus()
+                    switch fdaStatus {
+                    case .granted:
                         Telemetry.trackOnboarding(step: "fda_granted")
                         discover()
-                    } else {
+                    case .noFindMyDir:
+                        status = .noICloud
+                    case .noFriendData:
+                        status = .fdaGrantedNoData
+                    case .noFDA:
                         // FDA changes require a relaunch to take effect
                         isRestarting = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -402,6 +451,65 @@ struct SetupView: View {
                 withAnimation(.easeIn(duration: 0.3)) { showAddHint = true }
             }
         }
+    }
+
+    // MARK: - Not signed into iCloud
+
+    var noICloudView: some View {
+        VStack(spacing: 24) {
+            Spacer()
+            ZStack {
+                Circle().fill(DS.orange.opacity(0.1)).frame(width: 72, height: 72)
+                Image(systemName: "icloud.slash")
+                    .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.orange)
+            }
+            VStack(spacing: 8) {
+                Text("sign into iCloud")
+                    .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
+                Text("nearby uses Find My to see where your\nfriends are. sign into iCloud in\nSystem Settings → Apple ID to continue.")
+                    .font(.system(size: 14)).foregroundColor(DS.textSecondary)
+                    .multilineTextAlignment(.center).lineSpacing(3)
+            }
+            ActionButton(title: "open Apple ID settings", icon: "person.circle", color: DS.orange, style: .outline) {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                p.arguments = ["x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane"]
+                try? p.run()
+            }
+            .padding(.horizontal, 40)
+            ActionButton(title: "try again", icon: "arrow.clockwise", style: .outline) { preflight() }
+                .padding(.horizontal, 40)
+            Spacer()
+        }
+        .padding(32)
+    }
+
+    // MARK: - FDA granted but no Find My data
+
+    var noFindMyDataView: some View {
+        VStack(spacing: 24) {
+            Spacer()
+            ZStack {
+                Circle().fill(DS.green.opacity(0.1)).frame(width: 72, height: 72)
+                Image(systemName: "checkmark.shield")
+                    .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.green)
+            }
+            VStack(spacing: 8) {
+                Text("almost there")
+                    .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
+                Text("permissions are set up! but Find My hasn't\nsynced any friend locations yet.\n\nmake sure Find My is turned on and at least\none friend is sharing their location with you.")
+                    .font(.system(size: 14)).foregroundColor(DS.textSecondary)
+                    .multilineTextAlignment(.center).lineSpacing(3)
+            }
+            ActionButton(title: "open Find My", icon: "location", color: DS.green, style: .outline) {
+                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
+            }
+            .padding(.horizontal, 40)
+            ActionButton(title: "check again", icon: "arrow.clockwise", color: DS.blue) { preflight() }
+                .padding(.horizontal, 40)
+            Spacer()
+        }
+        .padding(32)
     }
 
     // MARK: - Loading

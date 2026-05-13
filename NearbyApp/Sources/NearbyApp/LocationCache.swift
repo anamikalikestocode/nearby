@@ -21,24 +21,53 @@ struct LocationCache {
     static var ownedBeacons: URL { baseDir.appendingPathComponent("OwnedBeacons") }
     static var sharedKeys: URL { baseDir.appendingPathComponent("SecureLocationSharedKeys") }
 
-    /// Check if we can actually read Find My data (not just the directory).
-    /// Tests both directory listing and reading an actual .record file.
-    static func canAccessFindMyData() -> Bool {
-        guard FileManager.default.isReadableFile(atPath: secureLocationCache.path) else {
-            return false
+    /// Why FDA access might not be available.
+    enum FDAStatus {
+        case granted              // can read Find My data
+        case noFDA                // TCC blocking access — needs Full Disk Access
+        case noFindMyDir          // base searchpartyd dir doesn't exist — not signed into iCloud
+        case noFriendData         // FDA works but no friend location data yet
+    }
+
+    /// Diagnose the state of Full Disk Access and Find My data availability.
+    /// Distinguishes between "needs FDA" vs "has FDA but Find My isn't set up."
+    static func checkFDAStatus() -> FDAStatus {
+        // First: does the base searchpartyd directory even exist?
+        // If not, the user likely isn't signed into iCloud at all.
+        guard FileManager.default.fileExists(atPath: baseDir.path) else {
+            return .noFindMyDir
         }
-        // Also verify we can list contents — catches partial FDA revocation
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: secureLocationCache, includingPropertiesForKeys: nil
+
+        // Try to list the base directory — if TCC blocks us, this fails.
+        // We test the base dir (not SecureLocationCache) because it always exists
+        // when signed into iCloud, even if no friends share locations.
+        guard let _ = try? FileManager.default.contentsOfDirectory(
+            at: baseDir, includingPropertiesForKeys: nil
         ) else {
-            return false
+            return .noFDA
         }
-        // Try to read at least one .record file to confirm real access
-        if let firstRecord = contents.first(where: { $0.pathExtension == "record" }) {
-            return (try? Data(contentsOf: firstRecord)) != nil
+
+        // FDA is granted. Now check if there's actually friend data.
+        // Check multiple directories — SecureLocationCache (locations),
+        // SecureLocationSharedKeys (friend identities), OwnedBeacons (user's devices).
+        let hasSharedKeys = (try? FileManager.default.contentsOfDirectory(
+            at: sharedKeys, includingPropertiesForKeys: nil
+        ))?.contains(where: { $0.pathExtension == "record" }) ?? false
+
+        let hasLocationCache = (try? FileManager.default.contentsOfDirectory(
+            at: secureLocationCache, includingPropertiesForKeys: nil
+        ))?.contains(where: { $0.pathExtension == "record" }) ?? false
+
+        if hasSharedKeys || hasLocationCache {
+            return .granted
         }
-        // Directory exists and is listable but empty — still counts as access
-        return true
+
+        return .noFriendData
+    }
+
+    /// Quick check: can we read Find My data? (convenience wrapper)
+    static func canAccessFindMyData() -> Bool {
+        checkFDAStatus() == .granted
     }
 
     /// Maximum age for friend locations — discard if older than this.
