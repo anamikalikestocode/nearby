@@ -8,6 +8,7 @@ enum AppStatus: Equatable {
     case connectFindMy
     case noICloud          // searchpartyd dir doesn't exist — not signed into iCloud
     case fdaGrantedNoData  // FDA works but no friend data — Find My not set up
+    case keychainPrompt    // about to ask for Keychain access — warn user first
     case discovering(String)
     case discoveryFailed(String)
     case noFriends
@@ -21,6 +22,7 @@ enum AppStatus: Equatable {
              (.connectFindMy, .connectFindMy),
              (.noICloud, .noICloud),
              (.fdaGrantedNoData, .fdaGrantedNoData),
+             (.keychainPrompt, .keychainPrompt),
              (.noFriends, .noFriends),
              (.setup, .setup),
              (.done, .done):
@@ -155,6 +157,7 @@ struct SetupView: View {
     @State private var showAddHint = false
     @State private var isRestarting = false
     @State private var isDiscovering = false  // guard against double discovery
+    @State private var hasShownKeychainWarning = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -169,6 +172,8 @@ struct SetupView: View {
                 noICloudView
             case .fdaGrantedNoData:
                 noFindMyDataView
+            case .keychainPrompt:
+                keychainPromptView
             case .discovering(let msg):
                 loadingView(msg)
             case .discoveryFailed(let reason):
@@ -230,7 +235,14 @@ struct SetupView: View {
                 switch fdaStatus {
                 case .granted:
                     Telemetry.trackOnboarding(step: "fda_granted")
-                    discover()
+                    // Show Keychain warning before first discovery attempt
+                    // so the user isn't surprised by the system password prompt
+                    if !hasShownKeychainWarning && !appState.isSetUp {
+                        hasShownKeychainWarning = true
+                        status = .keychainPrompt
+                    } else {
+                        discover()
+                    }
                 case .noFDA:
                     status = .connectFindMy
                 case .noFindMyDir:
@@ -267,14 +279,15 @@ struct SetupView: View {
             guard let key = key else {
                 DispatchQueue.main.async {
                     isDiscovering = false
-                    // Give actionable error based on what actually failed
                     if let cryptoErr = lastError as? CryptoError {
                         switch cryptoErr {
                         case .keyNotFound:
-                            status = .discoveryFailed("Find My encryption key not found in Keychain — make sure you're signed into iCloud with Find My enabled")
+                            status = .discoveryFailed("Find My encryption key not found — make sure you're signed into iCloud with Find My enabled")
                         case .keychainFailed(let osStatus):
                             if osStatus == errSecUserCanceled || osStatus == errSecAuthFailed {
-                                status = .discoveryFailed("Keychain access was denied — open Keychain Access, search for \"BeaconStore\", and make sure Nearby is allowed")
+                                status = .discoveryFailed("Keychain access was denied. open Keychain Access, find \"BeaconStore\", right-click → Get Info → Access Control, and add Nearby")
+                            } else if osStatus == errSecInteractionNotAllowed {
+                                status = .discoveryFailed("your Mac's Keychain is locked — unlock it by opening Keychain Access and entering your password")
                             } else {
                                 status = .discoveryFailed("couldn't read Keychain (error \(osStatus)) — try restarting your Mac")
                             }
@@ -528,6 +541,32 @@ struct SetupView: View {
             .padding(.horizontal, 40)
             ActionButton(title: "check again", icon: "arrow.clockwise", color: DS.blue) { preflight() }
                 .padding(.horizontal, 40)
+            Spacer()
+        }
+        .padding(32)
+    }
+
+    // MARK: - Keychain prompt warning
+
+    var keychainPromptView: some View {
+        VStack(spacing: 24) {
+            Spacer()
+            ZStack {
+                Circle().fill(DS.blue.opacity(0.1)).frame(width: 72, height: 72)
+                Image(systemName: "key")
+                    .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.blue)
+            }
+            VStack(spacing: 8) {
+                Text("one more thing")
+                    .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
+                Text("your Mac will ask for your password to let\nnearby read Find My data. this is normal —\ntap **Always Allow** so it doesn't ask again.")
+                    .font(.system(size: 14)).foregroundColor(DS.textSecondary)
+                    .multilineTextAlignment(.center).lineSpacing(3)
+            }
+            ActionButton(title: "continue", icon: "arrow.right", color: DS.blue) {
+                discover()
+            }
+            .padding(.horizontal, 40)
             Spacer()
         }
         .padding(32)
