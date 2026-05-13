@@ -19,9 +19,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 AppStateManager.shared.runCheck()
                 DispatchQueue.main.async { self.buildMenu() }
             }
+        } else {
+            // Only show setup window for new users who haven't completed onboarding
+            showSetup()
         }
-
-        showSetup()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

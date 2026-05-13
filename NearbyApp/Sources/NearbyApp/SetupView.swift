@@ -149,6 +149,8 @@ struct SetupView: View {
     @State private var fdaPolling = false
     @State private var isMoving = false
     @State private var showAddHint = false
+    @State private var isRestarting = false
+    @State private var isDiscovering = false  // guard against double discovery
 
     var body: some View {
         VStack(spacing: 0) {
@@ -207,9 +209,12 @@ struct SetupView: View {
     }
 
     private func discover() {
+        guard !isDiscovering else { return }  // prevent double discovery from timer + button race
+        isDiscovering = true
         status = .discovering("finding your friends...")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
             if case .discovering = status {
+                isDiscovering = false
                 status = .discoveryFailed("taking too long — make sure you're signed into iCloud and try again")
             }
         }
@@ -222,6 +227,7 @@ struct SetupView: View {
             }
             guard let key = key else {
                 DispatchQueue.main.async {
+                    isDiscovering = false
                     status = .discoveryFailed("couldn't read Find My data — make sure you're signed into iCloud")
                 }
                 return
@@ -229,6 +235,7 @@ struct SetupView: View {
             let found = LocationCache.discoverFriends(key: key)
             let phone = LocationCache.detectiPhone(key: key)
             DispatchQueue.main.async {
+                isDiscovering = false
                 friends = found
                 selectedFriendIds = Set(found.map { $0.findMyId })
                 deviceId = phone?.identifier ?? ""
@@ -256,11 +263,16 @@ struct SetupView: View {
     }
 
     private func relaunchApp() {
-        let url = Bundle.main.bundleURL
-        let config = NSWorkspace.OpenConfiguration()
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.terminate(nil) }
-        }
+        let appPath = Bundle.main.bundlePath
+        // Use a shell command to reopen the app after a short delay — this is reliable
+        // unlike NSWorkspace.openApplication which silently fails on self-relaunch
+        let script = "sleep 1 && open \"\(appPath)\""
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", script]
+        try? p.run()
+        // Quit immediately — the shell command reopens us in 1 second
+        NSApp.terminate(nil)
     }
 
     // MARK: - 1. Move to Applications
@@ -306,9 +318,13 @@ struct SetupView: View {
                 try p.run(); p.waitUntilExit()
                 Telemetry.trackOnboarding(step: "moved_to_apps")
                 DispatchQueue.main.async {
-                    NSWorkspace.shared.openApplication(at: dst, configuration: NSWorkspace.OpenConfiguration()) { _, _ in
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
-                    }
+                    // Use shell command to reopen — NSWorkspace.openApplication silently fails on self-relaunch
+                    let script = "sleep 1 && open \"\(dst.path)\""
+                    let relaunch = Process()
+                    relaunch.executableURL = URL(fileURLWithPath: "/bin/bash")
+                    relaunch.arguments = ["-c", script]
+                    try? relaunch.run()
+                    NSApp.terminate(nil)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -325,23 +341,52 @@ struct SetupView: View {
         VStack(spacing: 0) {
             Spacer()
             VStack(spacing: 24) {
-                Text("only one step")
+                ZStack {
+                    Circle().fill(DS.blue.opacity(0.1)).frame(width: 72, height: 72)
+                    Image(systemName: "lock.shield")
+                        .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.blue)
+                }
+
+                Text("turn on Nearby")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("we opened settings for you.\njust click on + and add nearby.\ntoggle on nearby.\nthat's it. promise.")
+                Text("we opened Settings for you — find **Nearby**\nin the list and toggle it on.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center)
                     .lineSpacing(3)
 
-                ActionButton(title: "done", icon: "checkmark", color: DS.blue) {
+                if showAddHint {
+                    Text("don't see Nearby? click the **+** button at the\nbottom, then find Nearby in Applications.")
+                        .font(.system(size: 13)).foregroundColor(DS.textMuted)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(3)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
+                ActionButton(title: "open settings again", icon: "gear", color: DS.blue, style: .outline) {
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                    p.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
+                    try? p.run()
+                }
+                .padding(.horizontal, 24)
+
+                ActionButton(title: isRestarting ? "restarting..." : "done — I turned it on", icon: isRestarting ? nil : "checkmark", color: DS.green, isLoading: isRestarting) {
                     if LocationCache.canAccessFindMyData() {
                         Telemetry.trackOnboarding(step: "fda_granted")
                         discover()
                     } else {
-                        // macOS often needs a relaunch for FDA to take effect
-                        relaunchApp()
+                        // FDA changes require a relaunch to take effect
+                        isRestarting = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            relaunchApp()
+                        }
                     }
                 }
                 .padding(.horizontal, 24)
+                .disabled(isRestarting)
+
+                Text("nearby will restart to apply the change")
+                    .font(.system(size: 12)).foregroundColor(DS.textMuted)
             }
             Spacer()
         }
@@ -352,6 +397,10 @@ struct SetupView: View {
             p.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
             try? p.run()
             startFDAPolling()
+            // Show the "don't see Nearby?" hint after 5 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                withAnimation(.easeIn(duration: 0.3)) { showAddHint = true }
+            }
         }
     }
 
@@ -481,8 +530,8 @@ struct SetupView: View {
                 finishSetup()
             }
             .padding(.horizontal, 24)
-            .opacity(phoneNumber.trimmingCharacters(in: .whitespaces).isEmpty ? 0.4 : 1)
-            .disabled(phoneNumber.trimmingCharacters(in: .whitespaces).isEmpty)
+            .opacity(canFinishSetup ? 1 : 0.4)
+            .disabled(!canFinishSetup)
 
             Text("you'll get iMessages when friends are close")
                 .font(.system(size: 12)).foregroundColor(DS.textMuted)
@@ -542,6 +591,17 @@ struct SetupView: View {
     func cleanModelName(_ model: String) -> String {
         model.components(separatedBy: ",").first?
             .replacingOccurrences(of: "[0-9]", with: "", options: .regularExpression) ?? model
+    }
+
+    /// Phone number has at least 10 digits (US) or starts with + and has 10+ digits
+    private var isValidPhone: Bool {
+        let digits = phoneNumber.filter { $0.isNumber }
+        return digits.count >= 10
+    }
+
+    /// Can only finish setup with a valid phone and at least one friend selected
+    private var canFinishSetup: Bool {
+        isValidPhone && !selectedFriendIds.isEmpty
     }
 
     private var radiusMetersFromMinutes: Int {
