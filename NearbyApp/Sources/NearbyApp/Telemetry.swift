@@ -8,7 +8,7 @@ struct Telemetry {
     private static let supabaseURL = "https://tsixhtjsmwqadwgrawbs.supabase.co"
     private static let supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRzaXhodGpzbXdxYWR3Z3Jhd2JzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIwODU1NjEsImV4cCI6MjA4NzY2MTU2MX0.nHylT0hHmOXQmi_T8KKE8sw7ecVYjhKrOGZzec3w6YA"
 
-    static let appVersion = "1.1.0"
+    static let appVersion = "1.2.0"
 
     // MARK: - Anonymous device ID
 
@@ -54,7 +54,7 @@ struct Telemetry {
         upsertDaily(checks: 1, alerts: alertsSent, intros: introsSent)
     }
 
-    /// Track onboarding funnel steps: moved_to_apps, fda_granted, automation_granted, first_test_text_sent
+    /// Track onboarding funnel steps: moved_to_apps, fda_granted
     static func trackOnboarding(step: String) {
         send(event: "onboarding_step", extra: ["step": step])
     }

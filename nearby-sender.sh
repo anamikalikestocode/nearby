@@ -3,7 +3,7 @@
 # Runs on Anamika's Mac only. DO NOT distribute this file.
 
 SUPABASE_URL="https://tsixhtjsmwqadwgrawbs.supabase.co"
-SERVICE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRzaXhodGpzbXdxYWR3Z3Jhd2JzIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MjA4NTU2MSwiZXhwIjoyMDg3NjYxNTYxfQ.CDk9_xlJxB1oKP__evNbbE5budTDcVwyCsrClbC5waQ"
+SERVICE_KEY="${NEARBY_SUPABASE_SERVICE_KEY:?Set NEARBY_SUPABASE_SERVICE_KEY env var}"
 POLL_INTERVAL=30
 
 send_imessage() {

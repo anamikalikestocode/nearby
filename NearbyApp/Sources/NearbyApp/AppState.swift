@@ -140,9 +140,10 @@ class AppStateManager: ObservableObject {
             return
         }
 
-        // Don't kill Find My if the user has it open
-        let userHasItOpen = NSWorkspace.shared.runningApplications.contains {
-            $0.bundleIdentifier == "com.apple.findmy" && !$0.isHidden
+        // Check if Find My was already running before we launch it —
+        // if so, don't kill it when we're done
+        let wasAlreadyRunning = NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == "com.apple.findmy"
         }
 
         let config = NSWorkspace.OpenConfiguration()
@@ -165,8 +166,8 @@ class AppStateManager: ObservableObject {
         // Give searchpartyd time to fetch the updated location from iCloud
         Thread.sleep(forTimeInterval: 6)
 
-        // Only quit Find My if we launched it (user didn't have it open)
-        if !userHasItOpen {
+        // Only quit Find My if we launched it (it wasn't already running)
+        if !wasAlreadyRunning {
             let quit = Process()
             quit.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
             quit.arguments = ["-x", "FindMy"]
