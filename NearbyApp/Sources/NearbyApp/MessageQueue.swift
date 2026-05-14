@@ -4,7 +4,7 @@ import Foundation
 /// User Macs INSERT into the queue (anon key). Anamika's Mac polls and sends via AppleScript.
 struct MessageQueue {
     private static let supabaseURL = "https://tsixhtjsmwqadwgrawbs.supabase.co"
-    private static let supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRzaXhodGpzbXdxYWR3Z3Jhd2JzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIwODU1NjEsImV4cCI6MjA4NzY2MTU2MX0.nHylT0hHmOXQmi_T8KKE8sw7ecVYjhKrOGZzec3w6YA"
+    private static let supabaseAnonKey = "sb_publishable_MXj7uW_tL2d80IkxJWx6kw_9r_3bxDO"
 
     /// Queue a message for delivery by the central sender.
     /// Fire-and-forget — failures are logged but don't block the app.

@@ -6,7 +6,7 @@ import CryptoKit
 struct Telemetry {
     // Supabase project (shared with The Drop)
     private static let supabaseURL = "https://tsixhtjsmwqadwgrawbs.supabase.co"
-    private static let supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRzaXhodGpzbXdxYWR3Z3Jhd2JzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIwODU1NjEsImV4cCI6MjA4NzY2MTU2MX0.nHylT0hHmOXQmi_T8KKE8sw7ecVYjhKrOGZzec3w6YA"
+    private static let supabaseAnonKey = "sb_publishable_MXj7uW_tL2d80IkxJWx6kw_9r_3bxDO"
 
     static let appVersion = "1.2.0"
 
