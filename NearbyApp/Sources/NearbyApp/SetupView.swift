@@ -339,16 +339,61 @@ struct SetupView: View {
         }
     }
 
+    /// Handle "done — I turned it on" button.
+    /// macOS TCC sometimes takes a few seconds to propagate FDA to the running process.
+    /// We retry several times before falling back to a full relaunch.
+    private func handleFDADone() {
+        let fdaStatus = LocationCache.checkFDAStatus()
+        switch fdaStatus {
+        case .granted:
+            Telemetry.trackOnboarding(step: "fda_granted")
+            if !hasShownKeychainWarning && !appState.isSetUp {
+                hasShownKeychainWarning = true
+                status = .keychainPrompt
+            } else {
+                discover()
+            }
+        case .noFindMyDir:
+            status = .noICloud
+        case .noFriendData:
+            status = .fdaGrantedNoData
+        case .noFDA:
+            // TCC hasn't propagated yet — retry a few times before restarting
+            isRestarting = true
+            fdaTimer?.invalidate()
+            fdaTimer = nil
+            fdaPolling = false
+            DispatchQueue.global().async {
+                for _ in 1...6 {
+                    Thread.sleep(forTimeInterval: 1.0)
+                    let retryStatus = LocationCache.checkFDAStatus()
+                    if retryStatus != .noFDA {
+                        DispatchQueue.main.async {
+                            isRestarting = false
+                            preflight()
+                        }
+                        return
+                    }
+                }
+                // Still no FDA after 6 seconds — must relaunch for TCC to take effect
+                DispatchQueue.main.async {
+                    relaunchApp()
+                }
+            }
+        }
+    }
+
     private func relaunchApp() {
         let appPath = Bundle.main.bundlePath
         // Use a shell command to reopen the app after a short delay — this is reliable
-        // unlike NSWorkspace.openApplication which silently fails on self-relaunch
-        let script = "sleep 1 && open \"\(appPath)\""
+        // unlike NSWorkspace.openApplication which silently fails on self-relaunch.
+        // 2-second delay ensures the old process fully exits before reopening.
+        let script = "sleep 2 && open \"\(appPath)\""
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = ["-c", script]
         try? p.run()
-        // Quit immediately — the shell command reopens us in 1 second
+        // Quit immediately — the shell command reopens us in 2 seconds
         NSApp.terminate(nil)
     }
 
@@ -447,28 +492,13 @@ struct SetupView: View {
                 }
                 .padding(.horizontal, 24)
 
-                ActionButton(title: isRestarting ? "restarting..." : "done — I turned it on", icon: isRestarting ? nil : "checkmark", color: DS.green, isLoading: isRestarting) {
-                    let fdaStatus = LocationCache.checkFDAStatus()
-                    switch fdaStatus {
-                    case .granted:
-                        Telemetry.trackOnboarding(step: "fda_granted")
-                        discover()
-                    case .noFindMyDir:
-                        status = .noICloud
-                    case .noFriendData:
-                        status = .fdaGrantedNoData
-                    case .noFDA:
-                        // FDA changes require a relaunch to take effect
-                        isRestarting = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            relaunchApp()
-                        }
-                    }
+                ActionButton(title: isRestarting ? "applying..." : "done — I turned it on", icon: isRestarting ? nil : "checkmark", color: DS.green, isLoading: isRestarting) {
+                    handleFDADone()
                 }
                 .padding(.horizontal, 24)
                 .disabled(isRestarting)
 
-                Text("nearby will restart to apply the change")
+                Text(isRestarting ? "checking permissions — one moment..." : "nearby will restart if needed to apply the change")
                     .font(.system(size: 12)).foregroundColor(DS.textMuted)
             }
             Spacer()
