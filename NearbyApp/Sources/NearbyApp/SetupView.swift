@@ -564,17 +564,21 @@ struct SetupView: View {
             Spacer()
             ZStack {
                 Circle().fill(DS.orange.opacity(0.1)).frame(width: 72, height: 72)
-                Image(systemName: "icloud.slash")
+                Image(systemName: "location.slash")
                     .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.orange)
             }
             VStack(spacing: 8) {
-                Text("sign into iCloud")
+                Text("turn on Find My")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("nearby uses Find My to see where your\nfriends are. sign into iCloud in\nSystem Settings → Apple ID to continue.")
+                Text("nearby needs Find My to see where your\nfriends are. open **Find My** and make sure\nyou're signed in and **Share My Location**\nis turned on.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center).lineSpacing(3)
             }
-            ActionButton(title: "open Apple ID settings", icon: "person.circle", color: DS.orange, style: .outline) {
+            ActionButton(title: "open Find My", icon: "location", color: DS.orange, style: .outline) {
+                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
+            }
+            .padding(.horizontal, 40)
+            ActionButton(title: "open iCloud settings", icon: "person.circle", color: DS.orange, style: .outline) {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
                 p.arguments = ["x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane"]
