@@ -158,6 +158,8 @@ struct SetupView: View {
     @State private var isRestarting = false
     @State private var isDiscovering = false  // guard against double discovery
     @State private var hasShownKeychainWarning = false
+    @State private var fdaRetryCancel = false  // signal handleFDADone retry to stop
+    @State private var fdaDoneAttempts = 0     // track how many times user clicked "done" without FDA
 
     var body: some View {
         VStack(spacing: 0) {
@@ -201,6 +203,7 @@ struct SetupView: View {
             fdaTimer?.invalidate()
             fdaTimer = nil
             fdaPolling = false
+            fdaRetryCancel = true  // cancel any in-progress handleFDADone retry loop
         }
     }
 
@@ -259,7 +262,8 @@ struct SetupView: View {
         isDiscovering = true
         status = .discovering("finding your friends...")
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
-            if case .discovering = status {
+            // Only timeout if we're still in discovering state AND still flagged as discovering
+            if case .discovering = status, isDiscovering {
                 isDiscovering = false
                 status = .discoveryFailed("taking too long — make sure you're signed into iCloud and try again")
             }
@@ -282,20 +286,20 @@ struct SetupView: View {
                     if let cryptoErr = lastError as? CryptoError {
                         switch cryptoErr {
                         case .keyNotFound:
-                            status = .discoveryFailed("Find My encryption key not found — make sure you're signed into iCloud with Find My enabled")
+                            status = .discoveryFailed("Find My isn't set up on this Mac — open Find My, sign in with your Apple ID, and make sure \"Share My Location\" is turned on")
                         case .keychainFailed(let osStatus):
                             if osStatus == errSecUserCanceled || osStatus == errSecAuthFailed {
-                                status = .discoveryFailed("Keychain access was denied. open Keychain Access, find \"BeaconStore\", right-click → Get Info → Access Control, and add Nearby")
+                                status = .discoveryFailed("nearby needs your password to read Find My data — click \"try again\" and tap \"Always Allow\" when your Mac asks for your password")
                             } else if osStatus == errSecInteractionNotAllowed {
-                                status = .discoveryFailed("your Mac's Keychain is locked — unlock it by opening Keychain Access and entering your password")
+                                status = .discoveryFailed("your Mac's keychain is locked — lock and unlock your Mac (or restart it), then try again")
                             } else {
-                                status = .discoveryFailed("couldn't read Keychain (error \(osStatus)) — try restarting your Mac")
+                                status = .discoveryFailed("something went wrong reading your data (code \(osStatus)) — try restarting your Mac and reopening Nearby")
                             }
                         default:
-                            status = .discoveryFailed("couldn't decrypt Find My data — try restarting your Mac")
+                            status = .discoveryFailed("couldn't read your Find My data — try restarting your Mac and reopening Nearby")
                         }
                     } else {
-                        status = .discoveryFailed("couldn't read Find My data — make sure you're signed into iCloud")
+                        status = .discoveryFailed("couldn't connect to Find My — make sure you're signed into iCloud and try again")
                     }
                 }
                 return
@@ -313,27 +317,38 @@ struct SetupView: View {
         }
     }
 
+    /// Stop FDA polling timer and reset state. Safe to call multiple times.
+    private func stopFDAPolling() {
+        fdaTimer?.invalidate()
+        fdaTimer = nil
+        fdaPolling = false
+    }
+
     private func startFDAPolling() {
         guard !fdaPolling else { return }
         fdaPolling = true
         fdaTimer?.invalidate()
         fdaTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
-            let fdaStatus = LocationCache.checkFDAStatus()
-            if fdaStatus == .granted {
+            // Do filesystem I/O off the main thread to avoid UI jank
+            DispatchQueue.global().async {
+                let fdaStatus = LocationCache.checkFDAStatus()
                 DispatchQueue.main.async {
-                    fdaTimer?.invalidate()
-                    fdaTimer = nil
-                    fdaPolling = false
-                    Telemetry.trackOnboarding(step: "fda_granted")
-                    discover()
-                }
-            } else if fdaStatus == .noFriendData || fdaStatus == .noFindMyDir {
-                // FDA was granted but there's a different problem
-                DispatchQueue.main.async {
-                    fdaTimer?.invalidate()
-                    fdaTimer = nil
-                    fdaPolling = false
-                    status = fdaStatus == .noFindMyDir ? .noICloud : .fdaGrantedNoData
+                    // Guard: if polling was stopped while we were checking, bail out
+                    guard fdaPolling else { return }
+                    if fdaStatus == .granted {
+                        stopFDAPolling()
+                        Telemetry.trackOnboarding(step: "fda_granted")
+                        if !hasShownKeychainWarning && !appState.isSetUp {
+                            hasShownKeychainWarning = true
+                            status = .keychainPrompt
+                        } else {
+                            discover()
+                        }
+                    } else if fdaStatus == .noFriendData || fdaStatus == .noFindMyDir {
+                        // FDA was granted but there's a different problem
+                        stopFDAPolling()
+                        status = fdaStatus == .noFindMyDir ? .noICloud : .fdaGrantedNoData
+                    }
                 }
             }
         }
@@ -343,6 +358,10 @@ struct SetupView: View {
     /// macOS TCC sometimes takes a few seconds to propagate FDA to the running process.
     /// We retry several times before falling back to a full relaunch.
     private func handleFDADone() {
+        // Always stop polling timer when button is pressed — we take over from here
+        stopFDAPolling()
+        fdaRetryCancel = false
+
         let fdaStatus = LocationCache.checkFDAStatus()
         switch fdaStatus {
         case .granted:
@@ -360,12 +379,13 @@ struct SetupView: View {
         case .noFDA:
             // TCC hasn't propagated yet — retry a few times before restarting
             isRestarting = true
-            fdaTimer?.invalidate()
-            fdaTimer = nil
-            fdaPolling = false
+            fdaDoneAttempts += 1
+            let attemptNumber = fdaDoneAttempts
             DispatchQueue.global().async {
                 for _ in 1...6 {
                     Thread.sleep(forTimeInterval: 1.0)
+                    // Check if user closed the window or navigated away
+                    if fdaRetryCancel { return }
                     let retryStatus = LocationCache.checkFDAStatus()
                     if retryStatus != .noFDA {
                         DispatchQueue.main.async {
@@ -375,9 +395,15 @@ struct SetupView: View {
                         return
                     }
                 }
-                // Still no FDA after 6 seconds — must relaunch for TCC to take effect
                 DispatchQueue.main.async {
-                    relaunchApp()
+                    isRestarting = false
+                    // If user has tried multiple times without success, explain instead of restarting
+                    if attemptNumber >= 2 {
+                        status = .discoveryFailed("the permission change hasn't taken effect yet. try quitting Nearby (⌘Q), then reopen it from Applications")
+                    } else {
+                        // First failed attempt — relaunch automatically
+                        relaunchApp()
+                    }
                 }
             }
         }
@@ -471,17 +497,21 @@ struct SetupView: View {
 
                 Text("turn on Nearby")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("we opened Settings for you — find **Nearby**\nin the list and toggle it on.")
+                Text("a Settings window just opened.\nfind **Nearby** in the list and flip its switch **on**.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center)
                     .lineSpacing(3)
 
                 if showAddHint {
-                    Text("don't see Nearby? click the **+** button at the\nbottom, then find Nearby in Applications.")
-                        .font(.system(size: 13)).foregroundColor(DS.textMuted)
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(3)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    VStack(spacing: 4) {
+                        Text("don't see Nearby in the list?")
+                            .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textSecondary)
+                        Text("scroll to the bottom → click the **+** button →\nfind **Nearby** in your Applications folder → click Open")
+                            .font(.system(size: 13)).foregroundColor(DS.textMuted)
+                            .multilineTextAlignment(.center)
+                            .lineSpacing(3)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
                 ActionButton(title: "open settings again", icon: "gear", color: DS.blue, style: .outline) {
@@ -498,13 +528,20 @@ struct SetupView: View {
                 .padding(.horizontal, 24)
                 .disabled(isRestarting)
 
-                Text(isRestarting ? "checking permissions — one moment..." : "nearby will restart if needed to apply the change")
-                    .font(.system(size: 12)).foregroundColor(DS.textMuted)
+                Text(isRestarting ? "checking permissions — one moment..." :
+                     fdaDoneAttempts > 0 ? "make sure the toggle next to Nearby is on (blue)" :
+                     "nearby will restart if needed to apply the change")
+                    .font(.system(size: 12)).foregroundColor(fdaDoneAttempts > 0 ? DS.orange : DS.textMuted)
             }
             Spacer()
         }
         .padding(.horizontal, 32)
         .onAppear {
+            // Reset state for fresh visit
+            showAddHint = false
+            isRestarting = false
+            fdaRetryCancel = false
+
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
             p.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
@@ -512,7 +549,10 @@ struct SetupView: View {
             startFDAPolling()
             // Show the "don't see Nearby?" hint after 5 seconds
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                withAnimation(.easeIn(duration: 0.3)) { showAddHint = true }
+                // Only show if we're still on the FDA screen
+                if case .connectFindMy = status {
+                    withAnimation(.easeIn(duration: 0.3)) { showAddHint = true }
+                }
             }
         }
     }
@@ -561,7 +601,7 @@ struct SetupView: View {
             VStack(spacing: 8) {
                 Text("almost there")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("permissions are set up! but Find My hasn't\nsynced any friend locations yet.\n\nmake sure Find My is turned on and at least\none friend is sharing their location with you.")
+                Text("permissions are good! but no friend locations\nwere found on this Mac yet.\n\nfor Nearby to work, at least one friend needs\nto share their location with you in Find My.\nopen Find My to check.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center).lineSpacing(3)
             }
@@ -589,7 +629,7 @@ struct SetupView: View {
             VStack(spacing: 8) {
                 Text("one more thing")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("your Mac will ask for your password to let\nnearby read Find My data. this is normal —\ntap **Always Allow** so it doesn't ask again.")
+                Text("your Mac will ask for your password next.\nthis is normal — it's letting Nearby read\nyour Find My data.\n\ntap **Always Allow** so it won't ask again.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center).lineSpacing(3)
             }
@@ -656,7 +696,7 @@ struct SetupView: View {
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center)
             }
-            ActionButton(title: "check again", icon: "arrow.clockwise", color: DS.purple, style: .outline) { discover() }
+            ActionButton(title: "check again", icon: "arrow.clockwise", color: DS.purple, style: .outline) { preflight() }
                 .padding(.horizontal, 40)
             Spacer()
         }
