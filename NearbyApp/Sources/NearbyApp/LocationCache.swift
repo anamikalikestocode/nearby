@@ -13,29 +13,13 @@ struct FriendInfo {
 }
 
 struct LocationCache {
-    /// Find My cache location — Apple moved this between macOS versions:
+    /// All known Find My cache locations — Apple moved this between macOS versions:
     ///   Legacy (macOS 13-14):  ~/Library/com.apple.icloud.searchpartyd/
     ///   Modern (macOS 15+):    ~/Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/Library/Storage/
-    /// We detect which one exists at launch and use it everywhere.
-    private static let baseDir: URL = {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let modern = home.appendingPathComponent(
-            "Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/Library/Storage")
-        let legacy = home.appendingPathComponent("Library/com.apple.icloud.searchpartyd")
-
-        // Prefer the modern path if it exists
-        if FileManager.default.fileExists(atPath: modern.path) {
-            return modern
-        }
-        // Fall back to legacy
-        if FileManager.default.fileExists(atPath: legacy.path) {
-            return legacy
-        }
-        // Neither exists — return modern (more likely on new Macs)
-        return modern
-    }()
-
-    /// Both possible base directories, for FDA checking (we need to test whichever exists).
+    /// We check ALL paths for data, merging results. This handles:
+    ///   - Macs upgraded from 14→15 with data in both locations
+    ///   - Future path changes by Apple
+    ///   - Edge cases where the "wrong" path has stale data
     private static let allBaseDirs: [URL] = {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return [
@@ -45,10 +29,46 @@ struct LocationCache {
         ]
     }()
 
-    static var secureLocationCache: URL { baseDir.appendingPathComponent("SecureLocationCache") }
-    static var beaconEstimatedLocation: URL { baseDir.appendingPathComponent("BeaconEstimatedLocation") }
-    static var ownedBeacons: URL { baseDir.appendingPathComponent("OwnedBeacons") }
-    static var sharedKeys: URL { baseDir.appendingPathComponent("SecureLocationSharedKeys") }
+    /// Find all existing base directories (may be 0, 1, or 2).
+    private static func existingBaseDirs() -> [URL] {
+        allBaseDirs.filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Find all existing subdirectories of a given name across all base dirs.
+    private static func subdirs(_ name: String) -> [URL] {
+        existingBaseDirs().map { $0.appendingPathComponent(name) }
+            .filter { FileManager.default.isDirectory($0) }
+    }
+
+    /// Collect all .record files from a subdirectory name across all base dirs.
+    private static func allRecords(in subdirName: String) -> [URL] {
+        var records: [URL] = []
+        for dir in subdirs(subdirName) {
+            if let contents = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil
+            ) {
+                records.append(contentsOf: contents.filter { $0.pathExtension == "record" })
+            }
+        }
+        return records
+    }
+
+    /// Count of raw .record files in a subdirectory across all base dirs.
+    /// Used by ProximityChecker to distinguish "no data" from "all stale."
+    static func recordCount(in subdirName: String) -> Int {
+        allRecords(in: subdirName).count
+    }
+
+    // Convenience — used by methods that need a specific device subfolder
+    private static func beaconLocationDir(for deviceId: String) -> URL? {
+        for dir in subdirs("BeaconEstimatedLocation") {
+            let deviceDir = dir.appendingPathComponent(deviceId)
+            if FileManager.default.isDirectory(deviceDir) {
+                return deviceDir
+            }
+        }
+        return nil
+    }
 
     /// Why FDA access might not be available.
     enum FDAStatus {
@@ -59,32 +79,46 @@ struct LocationCache {
     }
 
     /// Diagnose the state of Full Disk Access and Find My data availability.
-    /// Distinguishes between "needs FDA" vs "has FDA but Find My isn't set up."
+    /// Checks ALL known Find My cache paths (legacy + modern).
+    /// The Group Container path (modern) may not need FDA at all.
     static func checkFDAStatus() -> FDAStatus {
-        // Check both possible Find My cache paths (legacy and modern).
-        // If neither exists, Find My isn't set up on this Mac.
-        let existingDir = allBaseDirs.first { FileManager.default.fileExists(atPath: $0.path) }
+        let existing = existingBaseDirs()
 
-        guard let dir = existingDir else {
+        if existing.isEmpty {
+            NSLog("nearby: no Find My directories found. checked: %@",
+                  allBaseDirs.map { $0.path }.joined(separator: ", "))
             return .noFindMyDir
         }
 
-        // Try to list the directory — if TCC/FDA blocks us, this fails.
-        guard let _ = try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: nil
-        ) else {
+        NSLog("nearby: found Find My dirs: %@", existing.map { $0.path }.joined(separator: ", "))
+
+        // Try to list each existing directory — if TCC/FDA blocks us, listing fails.
+        // The Group Container path often doesn't need FDA, so we may get access
+        // to one but not the other.
+        var canReadAny = false
+        var allBlocked = true
+
+        for dir in existing {
+            if let _ = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil
+            ) {
+                canReadAny = true
+                allBlocked = false
+                NSLog("nearby: can read %@", dir.path)
+            } else {
+                NSLog("nearby: blocked from reading %@ (needs FDA?)", dir.path)
+            }
+        }
+
+        if !canReadAny {
             return .noFDA
         }
 
-        // FDA is granted. Now check if there's actually friend data.
-        // Use the resolved baseDir (which picked the right path at launch).
-        let hasSharedKeys = (try? FileManager.default.contentsOfDirectory(
-            at: sharedKeys, includingPropertiesForKeys: nil
-        ))?.contains(where: { $0.pathExtension == "record" }) ?? false
+        // We can read at least one path. Check for friend data across ALL readable dirs.
+        let hasSharedKeys = !allRecords(in: "SecureLocationSharedKeys").isEmpty
+        let hasLocationCache = !allRecords(in: "SecureLocationCache").isEmpty
 
-        let hasLocationCache = (try? FileManager.default.contentsOfDirectory(
-            at: secureLocationCache, includingPropertiesForKeys: nil
-        ))?.contains(where: { $0.pathExtension == "record" }) ?? false
+        NSLog("nearby: sharedKeys=%d locationCache=%d", hasSharedKeys ? 1 : 0, hasLocationCache ? 1 : 0)
 
         if hasSharedKeys || hasLocationCache {
             return .granted
@@ -115,11 +149,10 @@ struct LocationCache {
         var locations: [String: (lat: Double, lon: Double, age: Int)] = [:]
         var timestamps: [String: Double] = [:]  // track best timestamp per friend
         let now = Date().timeIntervalSince1970
-        guard let records = try? FileManager.default.contentsOfDirectory(
-            at: secureLocationCache, includingPropertiesForKeys: nil
-        ) else { return locations }
+        let records = allRecords(in: "SecureLocationCache")
+        if records.isEmpty { return locations }
 
-        for record in records where record.pathExtension == "record" {
+        for record in records {
             guard let parsed = try? Crypto.decryptRecord(recordPath: record, key: key) else { continue }
             guard let secureLoc = parsed["secureLocation"] as? [String: Any],
                   let fmid = secureLoc["findMyId"] as? String,
@@ -156,8 +189,7 @@ struct LocationCache {
     /// Get your iPhone's GPS location from BeaconEstimatedLocation.
     /// Returns nil if the most recent location is older than `maxLocationAge`.
     static func getMyLocation(deviceId: String, key: Data) -> (Double, Double)? {
-        let deviceDir = beaconEstimatedLocation.appendingPathComponent(deviceId)
-        guard FileManager.default.isDirectory(deviceDir) else { return nil }
+        guard let deviceDir = beaconLocationDir(for: deviceId) else { return nil }
         guard let records = try? FileManager.default.contentsOfDirectory(
             at: deviceDir, includingPropertiesForKeys: nil
         ) else { return nil }
@@ -205,12 +237,14 @@ struct LocationCache {
     static func discoverFriends(key: Data) -> [FriendInfo] {
         var friends: [FriendInfo] = []
         var seenIds = Set<String>()
-        guard let records = try? FileManager.default.contentsOfDirectory(
-            at: sharedKeys, includingPropertiesForKeys: nil
-        ) else { return friends }
+        let records = allRecords(in: "SecureLocationSharedKeys")
+        if records.isEmpty {
+            NSLog("nearby: no shared key records found in any path")
+            return friends
+        }
 
-        for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-            where record.pathExtension == "record" {
+        NSLog("nearby: found %d shared key records across all paths", records.count)
+        for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             guard let parsed = try? Crypto.decryptRecord(recordPath: record, key: key) else { continue }
             guard let fmid = parsed["findMyId"] as? String,
                   !seenIds.contains(fmid),
@@ -254,10 +288,11 @@ struct LocationCache {
     /// Detect the user's iPhone from OwnedBeacons.
     /// Prefers the phone with the most recent GPS data, falling back to most recent pairing date.
     static func detectiPhone(key: Data) -> (identifier: String, model: String)? {
-        guard FileManager.default.isDirectory(ownedBeacons) else { return nil }
-        guard let records = try? FileManager.default.contentsOfDirectory(
-            at: ownedBeacons, includingPropertiesForKeys: nil
-        ) else { return nil }
+        let records = allRecords(in: "OwnedBeacons")
+        if records.isEmpty {
+            NSLog("nearby: no owned beacon records found in any path")
+            return nil
+        }
 
         struct PhoneCandidate {
             let identifier: String
@@ -267,16 +302,14 @@ struct LocationCache {
         }
         var candidates: [PhoneCandidate] = []
 
-        for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-            where record.pathExtension == "record" {
+        for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             guard let parsed = try? Crypto.decryptRecord(recordPath: record, key: key) else { continue }
             guard let model = parsed["model"] as? String,
                   let ident = parsed["identifier"] as? String,
                   model.contains("iPhone")
             else { continue }
 
-            let locDir = beaconEstimatedLocation.appendingPathComponent(ident)
-            guard FileManager.default.isDirectory(locDir) else { continue }
+            guard let locDir = beaconLocationDir(for: ident) else { continue }
 
             // Check how recent the GPS data is for this device
             var latestGPSAge: TimeInterval?
