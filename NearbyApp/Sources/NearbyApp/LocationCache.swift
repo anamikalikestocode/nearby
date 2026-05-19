@@ -13,8 +13,37 @@ struct FriendInfo {
 }
 
 struct LocationCache {
-    private static let baseDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/com.apple.icloud.searchpartyd")
+    /// Find My cache location — Apple moved this between macOS versions:
+    ///   Legacy (macOS 13-14):  ~/Library/com.apple.icloud.searchpartyd/
+    ///   Modern (macOS 15+):    ~/Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/Library/Storage/
+    /// We detect which one exists at launch and use it everywhere.
+    private static let baseDir: URL = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let modern = home.appendingPathComponent(
+            "Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/Library/Storage")
+        let legacy = home.appendingPathComponent("Library/com.apple.icloud.searchpartyd")
+
+        // Prefer the modern path if it exists
+        if FileManager.default.fileExists(atPath: modern.path) {
+            return modern
+        }
+        // Fall back to legacy
+        if FileManager.default.fileExists(atPath: legacy.path) {
+            return legacy
+        }
+        // Neither exists — return modern (more likely on new Macs)
+        return modern
+    }()
+
+    /// Both possible base directories, for FDA checking (we need to test whichever exists).
+    private static let allBaseDirs: [URL] = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            home.appendingPathComponent(
+                "Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/Library/Storage"),
+            home.appendingPathComponent("Library/com.apple.icloud.searchpartyd"),
+        ]
+    }()
 
     static var secureLocationCache: URL { baseDir.appendingPathComponent("SecureLocationCache") }
     static var beaconEstimatedLocation: URL { baseDir.appendingPathComponent("BeaconEstimatedLocation") }
@@ -32,24 +61,23 @@ struct LocationCache {
     /// Diagnose the state of Full Disk Access and Find My data availability.
     /// Distinguishes between "needs FDA" vs "has FDA but Find My isn't set up."
     static func checkFDAStatus() -> FDAStatus {
-        // First: does the base searchpartyd directory even exist?
-        // If not, the user likely isn't signed into iCloud at all.
-        guard FileManager.default.fileExists(atPath: baseDir.path) else {
+        // Check both possible Find My cache paths (legacy and modern).
+        // If neither exists, Find My isn't set up on this Mac.
+        let existingDir = allBaseDirs.first { FileManager.default.fileExists(atPath: $0.path) }
+
+        guard let dir = existingDir else {
             return .noFindMyDir
         }
 
-        // Try to list the base directory — if TCC blocks us, this fails.
-        // We test the base dir (not SecureLocationCache) because it always exists
-        // when signed into iCloud, even if no friends share locations.
+        // Try to list the directory — if TCC/FDA blocks us, this fails.
         guard let _ = try? FileManager.default.contentsOfDirectory(
-            at: baseDir, includingPropertiesForKeys: nil
+            at: dir, includingPropertiesForKeys: nil
         ) else {
             return .noFDA
         }
 
         // FDA is granted. Now check if there's actually friend data.
-        // Check multiple directories — SecureLocationCache (locations),
-        // SecureLocationSharedKeys (friend identities), OwnedBeacons (user's devices).
+        // Use the resolved baseDir (which picked the right path at launch).
         let hasSharedKeys = (try? FileManager.default.contentsOfDirectory(
             at: sharedKeys, includingPropertiesForKeys: nil
         ))?.contains(where: { $0.pathExtension == "record" }) ?? false
