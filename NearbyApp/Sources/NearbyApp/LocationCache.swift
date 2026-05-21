@@ -13,19 +13,38 @@ struct FriendInfo {
 }
 
 struct LocationCache {
-    /// All known Find My cache locations — Apple moved this between macOS versions:
-    ///   Legacy (macOS 13-14):  ~/Library/com.apple.icloud.searchpartyd/
-    ///   Modern (macOS 15+):    ~/Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/Library/Storage/
-    /// We check ALL paths for data, merging results. This handles:
-    ///   - Macs upgraded from 14→15 with data in both locations
-    ///   - Future path changes by Apple
-    ///   - Edge cases where the "wrong" path has stale data
+    /// All known Find My / searchpartyd cache locations across macOS versions.
+    /// Apple has used multiple paths; we probe all of them and merge results.
+    ///
+    /// Primary (contains .record files our app reads):
+    ///   ~/Library/com.apple.icloud.searchpartyd/          — macOS 12-14, possibly 15+/26
+    ///   ~/Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/Library/Storage/
+    ///                                                      — candidate for macOS 26+, unconfirmed as default
+    ///
+    /// Secondary (indicates Find My is set up, different file formats):
+    ///   ~/Library/Caches/com.apple.findmy.fmipcore/       — macOS 12-26, JSON (encrypted after 14.4)
+    ///   ~/Library/Caches/com.apple.findmy.fmfcore/        — friends cache
+    ///   ~/Library/Group Containers/group.com.apple.findmy.findmylocateagent/Library/Application Support/
+    ///                                                      — macOS 14+, encrypted SQLite friend locations
     private static let allBaseDirs: [URL] = {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return [
+            // Primary — where .record files live
+            home.appendingPathComponent("Library/com.apple.icloud.searchpartyd"),
             home.appendingPathComponent(
                 "Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/Library/Storage"),
-            home.appendingPathComponent("Library/com.apple.icloud.searchpartyd"),
+        ]
+    }()
+
+    /// Additional paths that indicate Find My is set up (different file formats).
+    /// Used only for detection, not for reading .record data.
+    private static let secondaryFindMyDirs: [URL] = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            home.appendingPathComponent("Library/Caches/com.apple.findmy.fmipcore"),
+            home.appendingPathComponent("Library/Caches/com.apple.findmy.fmfcore"),
+            home.appendingPathComponent(
+                "Library/Group Containers/group.com.apple.findmy.findmylocateagent/Library/Application Support"),
         ]
     }()
 
@@ -85,8 +104,21 @@ struct LocationCache {
         let existing = existingBaseDirs()
 
         if existing.isEmpty {
+            // Primary paths missing — check secondary paths to distinguish
+            // "Find My not set up" from "data in a path we don't read yet"
+            let secondaryExists = secondaryFindMyDirs.filter {
+                FileManager.default.fileExists(atPath: $0.path)
+            }
+            if !secondaryExists.isEmpty {
+                NSLog("nearby: primary searchpartyd dirs missing, but secondary Find My paths exist: %@",
+                      secondaryExists.map { $0.path }.joined(separator: ", "))
+                // Find My IS set up, but searchpartyd hasn't synced .record files yet.
+                // Return noFriendData (not noFindMyDir) so we show "waiting for Find My"
+                // instead of "turn on Find My" — it IS on, just hasn't synced beacon data.
+                return .noFriendData
+            }
             NSLog("nearby: no Find My directories found. checked: %@",
-                  allBaseDirs.map { $0.path }.joined(separator: ", "))
+                  (allBaseDirs + secondaryFindMyDirs).map { $0.path }.joined(separator: ", "))
             return .noFindMyDir
         }
 
@@ -96,14 +128,12 @@ struct LocationCache {
         // The Group Container path often doesn't need FDA, so we may get access
         // to one but not the other.
         var canReadAny = false
-        var allBlocked = true
 
         for dir in existing {
             if let _ = try? FileManager.default.contentsOfDirectory(
                 at: dir, includingPropertiesForKeys: nil
             ) {
                 canReadAny = true
-                allBlocked = false
                 NSLog("nearby: can read %@", dir.path)
             } else {
                 NSLog("nearby: blocked from reading %@ (needs FDA?)", dir.path)
