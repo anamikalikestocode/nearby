@@ -160,6 +160,8 @@ struct SetupView: View {
     @State private var hasShownKeychainWarning = false
     @State private var fdaRetryCancel = false  // signal handleFDADone retry to stop
     @State private var fdaDoneAttempts = 0     // track how many times user clicked "done" without FDA
+    @State private var dataTimer: Timer?       // polls for friend data after Find My opens
+    @State private var dataPolling = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -203,6 +205,9 @@ struct SetupView: View {
             fdaTimer?.invalidate()
             fdaTimer = nil
             fdaPolling = false
+            dataTimer?.invalidate()
+            dataTimer = nil
+            dataPolling = false
             fdaRetryCancel = true  // cancel any in-progress handleFDADone retry loop
         }
     }
@@ -215,6 +220,19 @@ struct SetupView: View {
 
     private func preflight() {
         if SetupView.isInBadLocation {
+            // If a copy already exists in /Applications, just launch that one
+            // instead of showing the "move" screen. This happens when the user
+            // drags to Applications but then launches the DMG copy by mistake.
+            let appsPath = "/Applications/Nearby.app"
+            if FileManager.default.fileExists(atPath: appsPath) {
+                let script = "sleep 1 && open \"\(appsPath)\""
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/bin/bash")
+                p.arguments = ["-c", script]
+                try? p.run()
+                NSApp.terminate(nil)
+                return
+            }
             status = .needsMove
             return
         }
@@ -570,9 +588,14 @@ struct SetupView: View {
             VStack(spacing: 8) {
                 Text("turn on Find My")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("nearby needs Find My to see where your\nfriends are. open **Find My** and make sure\nyou're signed in and **Share My Location**\nis turned on.")
+                Text("we opened Find My for you — make sure\nyou're signed in and **Share My Location**\nis turned on.\n\nnearby will continue automatically\nonce Find My syncs your friends.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center).lineSpacing(3)
+            }
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("waiting for Find My...")
+                    .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textMuted)
             }
             ActionButton(title: "open Find My", icon: "location", color: DS.orange, style: .outline) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
@@ -585,14 +608,54 @@ struct SetupView: View {
                 try? p.run()
             }
             .padding(.horizontal, 40)
-            ActionButton(title: "try again", icon: "arrow.clockwise", style: .outline) { preflight() }
-                .padding(.horizontal, 40)
             Spacer()
         }
         .padding(32)
+        .onAppear {
+            // Auto-open Find My to help the user get set up
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
+            // Poll — once Find My syncs, the searchpartyd directory will appear
+            startDataPolling()
+        }
     }
 
     // MARK: - FDA granted but no Find My data
+
+    /// Poll for friend data every 5 seconds — searchpartyd syncs after Find My opens.
+    private func startDataPolling() {
+        guard !dataPolling else { return }
+        dataPolling = true
+        dataTimer?.invalidate()
+        dataTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+            DispatchQueue.global().async {
+                let fdaStatus = LocationCache.checkFDAStatus()
+                DispatchQueue.main.async {
+                    guard dataPolling else { return }
+                    if fdaStatus == .granted {
+                        dataTimer?.invalidate()
+                        dataTimer = nil
+                        dataPolling = false
+                        Telemetry.trackOnboarding(step: "fda_granted")
+                        if !hasShownKeychainWarning && !appState.isSetUp {
+                            hasShownKeychainWarning = true
+                            status = .keychainPrompt
+                        } else {
+                            discover()
+                        }
+                    }
+                    // If status changed to noFDA, need to show FDA screen
+                    else if fdaStatus == .noFDA {
+                        dataTimer?.invalidate()
+                        dataTimer = nil
+                        dataPolling = false
+                        status = .connectFindMy
+                    }
+                    // .noFriendData or .noFindMyDir — keep polling,
+                    // Find My may still be syncing / creating directories
+                }
+            }
+        }
+    }
 
     var noFindMyDataView: some View {
         VStack(spacing: 24) {
@@ -603,21 +666,29 @@ struct SetupView: View {
                     .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.green)
             }
             VStack(spacing: 8) {
-                Text("almost there")
+                Text("waiting for Find My")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("permissions are good! but no friend locations\nwere found on this Mac yet.\n\nfor Nearby to work, at least one friend needs\nto share their location with you in Find My.\nopen Find My to check.")
+                Text("we opened Find My to sync your friends'\nlocations. this usually takes a few seconds.\n\nmake sure at least one friend is sharing\ntheir location with you.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center).lineSpacing(3)
+            }
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("syncing...")
+                    .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textMuted)
             }
             ActionButton(title: "open Find My", icon: "location", color: DS.green, style: .outline) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
             }
             .padding(.horizontal, 40)
-            ActionButton(title: "check again", icon: "arrow.clockwise", color: DS.blue) { preflight() }
-                .padding(.horizontal, 40)
             Spacer()
         }
         .padding(32)
+        .onAppear {
+            // Auto-open Find My to trigger searchpartyd sync
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
+            startDataPolling()
+        }
     }
 
     // MARK: - Keychain prompt warning
