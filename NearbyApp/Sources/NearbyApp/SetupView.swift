@@ -162,6 +162,7 @@ struct SetupView: View {
     @State private var fdaDoneAttempts = 0     // track how many times user clicked "done" without FDA
     @State private var dataTimer: Timer?       // polls for friend data after Find My opens
     @State private var dataPolling = false
+    @State private var dataPollingStart: Date?  // when data polling began (for timeout message)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -215,7 +216,9 @@ struct SetupView: View {
     // MARK: - Preflight
 
     static var isInBadLocation: Bool {
-        !Bundle.main.bundlePath.hasPrefix("/Applications")
+        let path = Bundle.main.bundlePath
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return !path.hasPrefix("/Applications") && !path.hasPrefix("\(home)/Applications")
     }
 
     private func preflight() {
@@ -577,6 +580,8 @@ struct SetupView: View {
 
     // MARK: - Not signed into iCloud
 
+    @State private var showDataPollingHint = false
+
     var noICloudView: some View {
         VStack(spacing: 24) {
             Spacer()
@@ -597,6 +602,14 @@ struct SetupView: View {
                 Text("waiting for Find My...")
                     .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textMuted)
             }
+
+            if showDataPollingHint {
+                Text("taking a while? make sure Find My is open\nand at least one friend shares their location\nwith you. you can also try quitting Nearby\n(⌘Q) and reopening it.")
+                    .font(.system(size: 12)).foregroundColor(DS.orange)
+                    .multilineTextAlignment(.center).lineSpacing(2)
+                    .transition(.opacity)
+            }
+
             ActionButton(title: "open Find My", icon: "location", color: DS.orange, style: .outline) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
             }
@@ -608,14 +621,30 @@ struct SetupView: View {
                 try? p.run()
             }
             .padding(.horizontal, 40)
+
+            ActionButton(title: "try again", icon: "arrow.clockwise", color: DS.orange, style: .outline) {
+                dataTimer?.invalidate()
+                dataTimer = nil
+                dataPolling = false
+                preflight()
+            }
+            .padding(.horizontal, 40)
+
             Spacer()
         }
         .padding(32)
         .onAppear {
+            showDataPollingHint = false
             // Auto-open Find My to help the user get set up
             NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
             // Poll — once Find My syncs, the searchpartyd directory will appear
             startDataPolling()
+            // Show hint after 60 seconds if still stuck
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+                if case .noICloud = status {
+                    withAnimation(.easeIn(duration: 0.3)) { showDataPollingHint = true }
+                }
+            }
         }
     }
 
@@ -625,6 +654,7 @@ struct SetupView: View {
     private func startDataPolling() {
         guard !dataPolling else { return }
         dataPolling = true
+        dataPollingStart = Date()
         dataTimer?.invalidate()
         dataTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
             DispatchQueue.global().async {
@@ -657,6 +687,8 @@ struct SetupView: View {
         }
     }
 
+    @State private var showSyncHint = false
+
     var noFindMyDataView: some View {
         VStack(spacing: 24) {
             Spacer()
@@ -677,17 +709,41 @@ struct SetupView: View {
                 Text("syncing...")
                     .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textMuted)
             }
+
+            if showSyncHint {
+                Text("still syncing? open Find My and check that\nyou see friends on the People tab.\nif not, ask a friend to share their location\nwith you first.")
+                    .font(.system(size: 12)).foregroundColor(DS.orange)
+                    .multilineTextAlignment(.center).lineSpacing(2)
+                    .transition(.opacity)
+            }
+
             ActionButton(title: "open Find My", icon: "location", color: DS.green, style: .outline) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
             }
             .padding(.horizontal, 40)
+
+            ActionButton(title: "try again", icon: "arrow.clockwise", color: DS.green, style: .outline) {
+                dataTimer?.invalidate()
+                dataTimer = nil
+                dataPolling = false
+                preflight()
+            }
+            .padding(.horizontal, 40)
+
             Spacer()
         }
         .padding(32)
         .onAppear {
+            showSyncHint = false
             // Auto-open Find My to trigger searchpartyd sync
             NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
             startDataPolling()
+            // Show hint after 45 seconds if still stuck
+            DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
+                if case .fdaGrantedNoData = status {
+                    withAnimation(.easeIn(duration: 0.3)) { showSyncHint = true }
+                }
+            }
         }
     }
 
@@ -808,11 +864,17 @@ struct SetupView: View {
                 }
                 .foregroundColor(DS.green).padding(.top, 12)
             } else {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.circle").font(.system(size: 11))
-                    Text("no iPhone found").font(.system(size: 12, weight: .medium))
+                VStack(spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle").font(.system(size: 11))
+                        Text("no iPhone found").font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundColor(DS.orange)
+                    Text("nearby uses your iPhone's GPS. make sure\nyour iPhone is in Find My → Devices.")
+                        .font(.system(size: 11)).foregroundColor(DS.textMuted)
+                        .multilineTextAlignment(.center)
                 }
-                .foregroundColor(DS.orange).padding(.top, 12)
+                .padding(.top, 12)
             }
 
             Rectangle().fill(DS.border).frame(height: 1)
