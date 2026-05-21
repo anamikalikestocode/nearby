@@ -6,11 +6,9 @@ enum AppStatus: Equatable {
     case checking
     case needsMove
     case connectFindMy
-    case waitingForFindMy  // FDA works (or not needed) but no friend data yet — waiting for sync
-    case keychainPrompt    // about to ask for Keychain access — warn user first
+    case syncing           // waiting for Find My data + friends — single unified waiting screen
     case discovering(String)
     case discoveryFailed(String)
-    case noFriends
     case setup            // phone + friends, single screen
     case done
 
@@ -19,9 +17,7 @@ enum AppStatus: Equatable {
         case (.checking, .checking),
              (.needsMove, .needsMove),
              (.connectFindMy, .connectFindMy),
-             (.waitingForFindMy, .waitingForFindMy),
-             (.keychainPrompt, .keychainPrompt),
-             (.noFriends, .noFriends),
+             (.syncing, .syncing),
              (.setup, .setup),
              (.done, .done):
             return true
@@ -154,10 +150,8 @@ struct SetupView: View {
     @State private var isMoving = false
     @State private var showAddHint = false
     @State private var isDiscovering = false  // guard against double discovery
-    @State private var hasShownKeychainWarning = false
-    @State private var dataTimer: Timer?       // polls for friend data after Find My opens
-    @State private var dataPolling = false
-    @State private var dataPollingStart: Date?  // when data polling began (for timeout message)
+    @State private var syncTimer: Timer?       // unified poll for Find My data + friends
+    @State private var syncPolling = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -168,16 +162,12 @@ struct SetupView: View {
                 moveView
             case .connectFindMy:
                 findMyView
-            case .waitingForFindMy:
-                waitingForFindMyView
-            case .keychainPrompt:
-                keychainPromptView
+            case .syncing:
+                syncingView
             case .discovering(let msg):
                 loadingView(msg)
             case .discoveryFailed(let reason):
                 errorView(reason)
-            case .noFriends:
-                noFriendsView
             case .setup:
                 setupView
             case .done:
@@ -199,9 +189,9 @@ struct SetupView: View {
             fdaTimer?.invalidate()
             fdaTimer = nil
             fdaPolling = false
-            dataTimer?.invalidate()
-            dataTimer = nil
-            dataPolling = false
+            syncTimer?.invalidate()
+            syncTimer = nil
+            syncPolling = false
         }
     }
 
@@ -251,18 +241,11 @@ struct SetupView: View {
                 switch fdaStatus {
                 case .granted:
                     Telemetry.trackOnboarding(step: "fda_granted")
-                    // Show Keychain warning before first discovery attempt
-                    // so the user isn't surprised by the system password prompt
-                    if !hasShownKeychainWarning && !appState.isSetUp {
-                        hasShownKeychainWarning = true
-                        status = .keychainPrompt
-                    } else {
-                        discover()
-                    }
+                    discover()
                 case .noFDA:
                     status = .connectFindMy
                 case .noFindMyDir, .noFriendData:
-                    status = .waitingForFindMy
+                    status = .syncing
                 }
             }
         }
@@ -319,11 +302,16 @@ struct SetupView: View {
             let phone = LocationCache.detectiPhone(key: key)
             DispatchQueue.main.async {
                 isDiscovering = false
-                friends = found
-                selectedFriendIds = Set(found.map { $0.findMyId })
                 deviceId = phone?.identifier ?? ""
                 deviceModel = phone?.model ?? ""
-                status = found.isEmpty ? .noFriends : .setup
+                if found.isEmpty {
+                    // No friends yet — go to syncing screen which will keep polling
+                    status = .syncing
+                } else {
+                    friends = found
+                    selectedFriendIds = Set(found.map { $0.findMyId })
+                    status = .setup
+                }
             }
         }
     }
@@ -349,16 +337,11 @@ struct SetupView: View {
                     if fdaStatus == .granted {
                         stopFDAPolling()
                         Telemetry.trackOnboarding(step: "fda_granted")
-                        if !hasShownKeychainWarning && !appState.isSetUp {
-                            hasShownKeychainWarning = true
-                            status = .keychainPrompt
-                        } else {
-                            discover()
-                        }
+                        discover()
                     } else if fdaStatus == .noFriendData || fdaStatus == .noFindMyDir {
                         // FDA was granted but no friend data yet
                         stopFDAPolling()
-                        status = .waitingForFindMy
+                        status = .syncing
                     }
                 }
             }
@@ -524,48 +507,56 @@ struct SetupView: View {
         }
     }
 
-    // MARK: - Waiting for Find My to sync
+    // MARK: - Syncing (unified waiting screen)
 
-    /// Poll for friend data every 5 seconds — searchpartyd syncs after Find My opens.
-    private func startDataPolling() {
-        guard !dataPolling else { return }
-        dataPolling = true
-        dataPollingStart = Date()
-        dataTimer?.invalidate()
-        dataTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+    /// Unified poll: checks FDA status, then tries full friend discovery.
+    /// Replaces the old separate dataPolling + friendPollTimer.
+    private func startSyncPolling() {
+        guard !syncPolling else { return }
+        syncPolling = true
+        syncTimer?.invalidate()
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { _ in
             DispatchQueue.global().async {
                 let fdaStatus = LocationCache.checkFDAStatus()
-                DispatchQueue.main.async {
-                    guard dataPolling else { return }
-                    if fdaStatus == .granted {
-                        dataTimer?.invalidate()
-                        dataTimer = nil
-                        dataPolling = false
-                        Telemetry.trackOnboarding(step: "fda_granted")
-                        if !hasShownKeychainWarning && !appState.isSetUp {
-                            hasShownKeychainWarning = true
-                            status = .keychainPrompt
-                        } else {
-                            discover()
-                        }
-                    }
-                    // If FDA is suddenly needed, show FDA screen
-                    else if fdaStatus == .noFDA {
-                        dataTimer?.invalidate()
-                        dataTimer = nil
-                        dataPolling = false
+
+                // If FDA needed, switch to FDA screen
+                if fdaStatus == .noFDA {
+                    DispatchQueue.main.async {
+                        guard syncPolling else { return }
+                        syncTimer?.invalidate()
+                        syncTimer = nil
+                        syncPolling = false
                         status = .connectFindMy
                     }
-                    // .noFriendData or .noFindMyDir — keep polling,
-                    // Find My may still be syncing / creating directories
+                    return
                 }
+
+                // If data available, try full discovery
+                if fdaStatus == .granted {
+                    guard let key = try? Crypto.readBeaconKey() else { return }
+                    let found = LocationCache.discoverFriends(key: key)
+                    guard !found.isEmpty else { return }  // keep polling
+                    let phone = LocationCache.detectiPhone(key: key)
+                    DispatchQueue.main.async {
+                        guard syncPolling, case .syncing = status else { return }
+                        syncTimer?.invalidate()
+                        syncTimer = nil
+                        syncPolling = false
+                        friends = found
+                        selectedFriendIds = Set(found.map { $0.findMyId })
+                        deviceId = phone?.identifier ?? ""
+                        deviceModel = phone?.model ?? ""
+                        status = .setup
+                    }
+                }
+                // .noFriendData or .noFindMyDir — keep polling
             }
         }
     }
 
     @State private var showSyncHint = false
 
-    var waitingForFindMyView: some View {
+    var syncingView: some View {
         VStack(spacing: 24) {
             Spacer()
             ZStack {
@@ -603,44 +594,11 @@ struct SetupView: View {
         .padding(32)
         .onAppear {
             showSyncHint = false
-            // Auto-open Find My to trigger searchpartyd sync
             NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
-            startDataPolling()
-            // Show hint after 45 seconds if still stuck
+            startSyncPolling()
             DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
-                if case .waitingForFindMy = status {
+                if case .syncing = status {
                     withAnimation(.easeIn(duration: 0.3)) { showSyncHint = true }
-                }
-            }
-        }
-    }
-
-    // MARK: - Keychain prompt warning
-
-    var keychainPromptView: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            ZStack {
-                Circle().fill(DS.blue.opacity(0.1)).frame(width: 72, height: 72)
-                Image(systemName: "key")
-                    .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.blue)
-            }
-            VStack(spacing: 8) {
-                Text("one more thing")
-                    .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("your Mac is about to ask for your password.\nthis is normal — it's letting Nearby read\nyour Find My data.\n\ntap **Always Allow** so it won't ask again.")
-                    .font(.system(size: 14)).foregroundColor(DS.textSecondary)
-                    .multilineTextAlignment(.center).lineSpacing(3)
-            }
-            ProgressView().controlSize(.small)
-            Spacer()
-        }
-        .padding(32)
-        .onAppear {
-            // Give the user 2 seconds to read the message, then auto-trigger
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                if case .keychainPrompt = status {
-                    discover()
                 }
             }
         }
@@ -681,67 +639,6 @@ struct SetupView: View {
             Spacer()
         }
         .padding(32)
-    }
-
-    // MARK: - No Friends
-
-    @State private var friendPollTimer: Timer?
-
-    var noFriendsView: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            ZStack {
-                Circle().fill(DS.purple.opacity(0.1)).frame(width: 72, height: 72)
-                Image(systemName: "person.2.slash")
-                    .font(.system(size: 28, weight: .medium)).foregroundStyle(DS.purple)
-            }
-            VStack(spacing: 8) {
-                Text("no friends found yet")
-                    .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("open Find My and make sure at least one\nfriend is sharing their location with you.\n\nnearby will detect them automatically.")
-                    .font(.system(size: 14)).foregroundColor(DS.textSecondary)
-                    .multilineTextAlignment(.center).lineSpacing(3)
-            }
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("checking...")
-                    .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textMuted)
-            }
-            ActionButton(title: "open Find My", icon: "location", color: DS.purple, style: .outline) {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
-            }
-            .padding(.horizontal, 40)
-            Spacer()
-        }
-        .padding(32)
-        .onAppear {
-            // Auto-open Find My so user can set up location sharing
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
-            // Poll every 10 seconds — re-run discovery to check for new friends
-            friendPollTimer?.invalidate()
-            friendPollTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
-                DispatchQueue.global().async {
-                    guard let key = try? Crypto.readBeaconKey() else { return }
-                    let found = LocationCache.discoverFriends(key: key)
-                    guard !found.isEmpty else { return }
-                    let phone = LocationCache.detectiPhone(key: key)
-                    DispatchQueue.main.async {
-                        guard case .noFriends = status else { return }
-                        friendPollTimer?.invalidate()
-                        friendPollTimer = nil
-                        friends = found
-                        selectedFriendIds = Set(found.map { $0.findMyId })
-                        deviceId = phone?.identifier ?? ""
-                        deviceModel = phone?.model ?? ""
-                        status = .setup
-                    }
-                }
-            }
-        }
-        .onDisappear {
-            friendPollTimer?.invalidate()
-            friendPollTimer = nil
-        }
     }
 
     // MARK: - 3. Setup (phone + friends — one screen, one button)
