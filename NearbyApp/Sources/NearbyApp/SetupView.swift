@@ -455,20 +455,19 @@ struct SetupView: View {
                     .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.blue)
             }
             VStack(spacing: 8) {
-                Text("one sec")
+                Text("setting up...")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("nearby needs to move to your\nApplications folder first")
+                Text("moving nearby to your Applications folder")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center)
             }
-            ActionButton(title: "move & continue", icon: "arrow.right", isLoading: isMoving) {
-                moveToApplications()
-            }
-            .padding(.horizontal, 40)
-            .disabled(isMoving)
+            ProgressView().controlSize(.small)
             Spacer()
         }
         .padding(32)
+        .onAppear {
+            if !isMoving { moveToApplications() }
+        }
     }
 
     private func moveToApplications() {
@@ -760,17 +759,22 @@ struct SetupView: View {
             VStack(spacing: 8) {
                 Text("one more thing")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("your Mac will ask for your password next.\nthis is normal — it's letting Nearby read\nyour Find My data.\n\ntap **Always Allow** so it won't ask again.")
+                Text("your Mac is about to ask for your password.\nthis is normal — it's letting Nearby read\nyour Find My data.\n\ntap **Always Allow** so it won't ask again.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center).lineSpacing(3)
             }
-            ActionButton(title: "continue", icon: "arrow.right", color: DS.blue) {
-                discover()
-            }
-            .padding(.horizontal, 40)
+            ProgressView().controlSize(.small)
             Spacer()
         }
         .padding(32)
+        .onAppear {
+            // Give the user 2 seconds to read the message, then auto-trigger
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                if case .keychainPrompt = status {
+                    discover()
+                }
+            }
+        }
     }
 
     // MARK: - Loading
@@ -812,6 +816,8 @@ struct SetupView: View {
 
     // MARK: - No Friends
 
+    @State private var friendPollTimer: Timer?
+
     var noFriendsView: some View {
         VStack(spacing: 24) {
             Spacer()
@@ -821,17 +827,52 @@ struct SetupView: View {
                     .font(.system(size: 28, weight: .medium)).foregroundStyle(DS.purple)
             }
             VStack(spacing: 8) {
-                Text("no friends found")
+                Text("no friends found yet")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("make sure someone is sharing their\nlocation with you in Find My")
+                Text("open Find My and make sure at least one\nfriend is sharing their location with you.\n\nnearby will detect them automatically.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
-                    .multilineTextAlignment(.center)
+                    .multilineTextAlignment(.center).lineSpacing(3)
             }
-            ActionButton(title: "check again", icon: "arrow.clockwise", color: DS.purple, style: .outline) { preflight() }
-                .padding(.horizontal, 40)
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("checking...")
+                    .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textMuted)
+            }
+            ActionButton(title: "open Find My", icon: "location", color: DS.purple, style: .outline) {
+                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
+            }
+            .padding(.horizontal, 40)
             Spacer()
         }
         .padding(32)
+        .onAppear {
+            // Auto-open Find My so user can set up location sharing
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
+            // Poll every 10 seconds — re-run discovery to check for new friends
+            friendPollTimer?.invalidate()
+            friendPollTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+                DispatchQueue.global().async {
+                    guard let key = try? Crypto.readBeaconKey() else { return }
+                    let found = LocationCache.discoverFriends(key: key)
+                    guard !found.isEmpty else { return }
+                    let phone = LocationCache.detectiPhone(key: key)
+                    DispatchQueue.main.async {
+                        guard case .noFriends = status else { return }
+                        friendPollTimer?.invalidate()
+                        friendPollTimer = nil
+                        friends = found
+                        selectedFriendIds = Set(found.map { $0.findMyId })
+                        deviceId = phone?.identifier ?? ""
+                        deviceModel = phone?.model ?? ""
+                        status = .setup
+                    }
+                }
+            }
+        }
+        .onDisappear {
+            friendPollTimer?.invalidate()
+            friendPollTimer = nil
+        }
     }
 
     // MARK: - 3. Setup (phone + friends — one screen, one button)
