@@ -6,8 +6,7 @@ enum AppStatus: Equatable {
     case checking
     case needsMove
     case connectFindMy
-    case noICloud          // searchpartyd dir doesn't exist — not signed into iCloud
-    case fdaGrantedNoData  // FDA works but no friend data — Find My not set up
+    case waitingForFindMy  // FDA works (or not needed) but no friend data yet — waiting for sync
     case keychainPrompt    // about to ask for Keychain access — warn user first
     case discovering(String)
     case discoveryFailed(String)
@@ -20,8 +19,7 @@ enum AppStatus: Equatable {
         case (.checking, .checking),
              (.needsMove, .needsMove),
              (.connectFindMy, .connectFindMy),
-             (.noICloud, .noICloud),
-             (.fdaGrantedNoData, .fdaGrantedNoData),
+             (.waitingForFindMy, .waitingForFindMy),
              (.keychainPrompt, .keychainPrompt),
              (.noFriends, .noFriends),
              (.setup, .setup),
@@ -155,11 +153,8 @@ struct SetupView: View {
     @State private var fdaPolling = false
     @State private var isMoving = false
     @State private var showAddHint = false
-    @State private var isRestarting = false
     @State private var isDiscovering = false  // guard against double discovery
     @State private var hasShownKeychainWarning = false
-    @State private var fdaRetryCancel = false  // signal handleFDADone retry to stop
-    @State private var fdaDoneAttempts = 0     // track how many times user clicked "done" without FDA
     @State private var dataTimer: Timer?       // polls for friend data after Find My opens
     @State private var dataPolling = false
     @State private var dataPollingStart: Date?  // when data polling began (for timeout message)
@@ -173,10 +168,8 @@ struct SetupView: View {
                 moveView
             case .connectFindMy:
                 findMyView
-            case .noICloud:
-                noICloudView
-            case .fdaGrantedNoData:
-                noFindMyDataView
+            case .waitingForFindMy:
+                waitingForFindMyView
             case .keychainPrompt:
                 keychainPromptView
             case .discovering(let msg):
@@ -209,7 +202,6 @@ struct SetupView: View {
             dataTimer?.invalidate()
             dataTimer = nil
             dataPolling = false
-            fdaRetryCancel = true  // cancel any in-progress handleFDADone retry loop
         }
     }
 
@@ -269,10 +261,8 @@ struct SetupView: View {
                     }
                 case .noFDA:
                     status = .connectFindMy
-                case .noFindMyDir:
-                    status = .noICloud
-                case .noFriendData:
-                    status = .fdaGrantedNoData
+                case .noFindMyDir, .noFriendData:
+                    status = .waitingForFindMy
                 }
             }
         }
@@ -366,64 +356,9 @@ struct SetupView: View {
                             discover()
                         }
                     } else if fdaStatus == .noFriendData || fdaStatus == .noFindMyDir {
-                        // FDA was granted but there's a different problem
+                        // FDA was granted but no friend data yet
                         stopFDAPolling()
-                        status = fdaStatus == .noFindMyDir ? .noICloud : .fdaGrantedNoData
-                    }
-                }
-            }
-        }
-    }
-
-    /// Handle "done — I turned it on" button.
-    /// macOS TCC sometimes takes a few seconds to propagate FDA to the running process.
-    /// We retry several times before falling back to a full relaunch.
-    private func handleFDADone() {
-        // Always stop polling timer when button is pressed — we take over from here
-        stopFDAPolling()
-        fdaRetryCancel = false
-
-        let fdaStatus = LocationCache.checkFDAStatus()
-        switch fdaStatus {
-        case .granted:
-            Telemetry.trackOnboarding(step: "fda_granted")
-            if !hasShownKeychainWarning && !appState.isSetUp {
-                hasShownKeychainWarning = true
-                status = .keychainPrompt
-            } else {
-                discover()
-            }
-        case .noFindMyDir:
-            status = .noICloud
-        case .noFriendData:
-            status = .fdaGrantedNoData
-        case .noFDA:
-            // TCC hasn't propagated yet — retry a few times before restarting
-            isRestarting = true
-            fdaDoneAttempts += 1
-            let attemptNumber = fdaDoneAttempts
-            DispatchQueue.global().async {
-                for _ in 1...6 {
-                    Thread.sleep(forTimeInterval: 1.0)
-                    // Check if user closed the window or navigated away
-                    if fdaRetryCancel { return }
-                    let retryStatus = LocationCache.checkFDAStatus()
-                    if retryStatus != .noFDA {
-                        DispatchQueue.main.async {
-                            isRestarting = false
-                            preflight()
-                        }
-                        return
-                    }
-                }
-                DispatchQueue.main.async {
-                    isRestarting = false
-                    // If user has tried multiple times without success, explain instead of restarting
-                    if attemptNumber >= 2 {
-                        status = .discoveryFailed("the permission change hasn't taken effect yet. try quitting Nearby (⌘Q), then reopen it from Applications")
-                    } else {
-                        // First failed attempt — relaunch automatically
-                        relaunchApp()
+                        status = .waitingForFindMy
                     }
                 }
             }
@@ -505,6 +440,8 @@ struct SetupView: View {
 
     // MARK: - 2. Connect Find My (one screen, zero jargon)
 
+    @State private var showFDARestartHint = false
+
     var findMyView: some View {
         VStack(spacing: 0) {
             Spacer()
@@ -517,10 +454,16 @@ struct SetupView: View {
 
                 Text("turn on Nearby")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("a Settings window just opened.\nfind **Nearby** in the list and flip its switch **on**.")
+                Text("a Settings window just opened.\nfind **Nearby** in the list and flip its switch **on**.\n\nwe'll continue automatically.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center)
                     .lineSpacing(3)
+
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("waiting for permission...")
+                        .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textMuted)
+                }
 
                 if showAddHint {
                     VStack(spacing: 4) {
@@ -534,120 +477,54 @@ struct SetupView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
-                ActionButton(title: "open settings again", icon: "gear", color: DS.blue, style: .outline) {
-                    let p = Process()
-                    p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                    p.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
-                    try? p.run()
+                if showFDARestartHint {
+                    VStack(spacing: 12) {
+                        Text("already turned it on?")
+                            .font(.system(size: 13, weight: .medium)).foregroundColor(DS.orange)
+                        ActionButton(title: "restart nearby", icon: "arrow.clockwise", color: DS.orange, style: .outline) {
+                            relaunchApp()
+                        }
+                        .padding(.horizontal, 24)
+                    }
+                    .transition(.opacity)
+                } else {
+                    ActionButton(title: "open settings again", icon: "gear", color: DS.blue, style: .outline) {
+                        let p = Process()
+                        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                        p.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
+                        try? p.run()
+                    }
+                    .padding(.horizontal, 24)
                 }
-                .padding(.horizontal, 24)
-
-                ActionButton(title: isRestarting ? "applying..." : "done — I turned it on", icon: isRestarting ? nil : "checkmark", color: DS.green, isLoading: isRestarting) {
-                    handleFDADone()
-                }
-                .padding(.horizontal, 24)
-                .disabled(isRestarting)
-
-                Text(isRestarting ? "checking permissions — one moment..." :
-                     fdaDoneAttempts > 0 ? "make sure the toggle next to Nearby is on (blue)" :
-                     "nearby will restart if needed to apply the change")
-                    .font(.system(size: 12)).foregroundColor(fdaDoneAttempts > 0 ? DS.orange : DS.textMuted)
             }
             Spacer()
         }
         .padding(.horizontal, 32)
         .onAppear {
-            // Reset state for fresh visit
             showAddHint = false
-            isRestarting = false
-            fdaRetryCancel = false
+            showFDARestartHint = false
 
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
             p.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
             try? p.run()
             startFDAPolling()
-            // Show the "don't see Nearby?" hint after 5 seconds
+            // Show "don't see Nearby?" hint after 5 seconds
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                // Only show if we're still on the FDA screen
                 if case .connectFindMy = status {
                     withAnimation(.easeIn(duration: 0.3)) { showAddHint = true }
                 }
             }
-        }
-    }
-
-    // MARK: - Not signed into iCloud
-
-    @State private var showDataPollingHint = false
-
-    var noICloudView: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            ZStack {
-                Circle().fill(DS.orange.opacity(0.1)).frame(width: 72, height: 72)
-                Image(systemName: "location.slash")
-                    .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.orange)
-            }
-            VStack(spacing: 8) {
-                Text("turn on Find My")
-                    .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("we opened Find My for you — make sure\nyou're signed in and **Share My Location**\nis turned on.\n\nnearby will continue automatically\nonce Find My syncs your friends.")
-                    .font(.system(size: 14)).foregroundColor(DS.textSecondary)
-                    .multilineTextAlignment(.center).lineSpacing(3)
-            }
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("waiting for Find My...")
-                    .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textMuted)
-            }
-
-            if showDataPollingHint {
-                Text("taking a while? make sure Find My is open\nand at least one friend shares their location\nwith you. you can also try quitting Nearby\n(⌘Q) and reopening it.")
-                    .font(.system(size: 12)).foregroundColor(DS.orange)
-                    .multilineTextAlignment(.center).lineSpacing(2)
-                    .transition(.opacity)
-            }
-
-            ActionButton(title: "open Find My", icon: "location", color: DS.orange, style: .outline) {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
-            }
-            .padding(.horizontal, 40)
-            ActionButton(title: "open iCloud settings", icon: "person.circle", color: DS.orange, style: .outline) {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                p.arguments = ["x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane"]
-                try? p.run()
-            }
-            .padding(.horizontal, 40)
-
-            ActionButton(title: "try again", icon: "arrow.clockwise", color: DS.orange, style: .outline) {
-                dataTimer?.invalidate()
-                dataTimer = nil
-                dataPolling = false
-                preflight()
-            }
-            .padding(.horizontal, 40)
-
-            Spacer()
-        }
-        .padding(32)
-        .onAppear {
-            showDataPollingHint = false
-            // Auto-open Find My to help the user get set up
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
-            // Poll — once Find My syncs, the searchpartyd directory will appear
-            startDataPolling()
-            // Show hint after 60 seconds if still stuck
-            DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
-                if case .noICloud = status {
-                    withAnimation(.easeIn(duration: 0.3)) { showDataPollingHint = true }
+            // Show "already turned it on? restart" after 20 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+                if case .connectFindMy = status {
+                    withAnimation(.easeIn(duration: 0.3)) { showFDARestartHint = true }
                 }
             }
         }
     }
 
-    // MARK: - FDA granted but no Find My data
+    // MARK: - Waiting for Find My to sync
 
     /// Poll for friend data every 5 seconds — searchpartyd syncs after Find My opens.
     private func startDataPolling() {
@@ -672,7 +549,7 @@ struct SetupView: View {
                             discover()
                         }
                     }
-                    // If status changed to noFDA, need to show FDA screen
+                    // If FDA is suddenly needed, show FDA screen
                     else if fdaStatus == .noFDA {
                         dataTimer?.invalidate()
                         dataTimer = nil
@@ -688,7 +565,7 @@ struct SetupView: View {
 
     @State private var showSyncHint = false
 
-    var noFindMyDataView: some View {
+    var waitingForFindMyView: some View {
         VStack(spacing: 24) {
             Spacer()
             ZStack {
@@ -697,9 +574,9 @@ struct SetupView: View {
                     .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.green)
             }
             VStack(spacing: 8) {
-                Text("waiting for Find My")
+                Text("almost there")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("we opened Find My to sync your friends'\nlocations. this usually takes a few seconds.\n\nmake sure at least one friend is sharing\ntheir location with you.")
+                Text("we opened Find My to sync your friends'\nlocations. this usually takes a few seconds.")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
                     .multilineTextAlignment(.center).lineSpacing(3)
             }
@@ -710,7 +587,7 @@ struct SetupView: View {
             }
 
             if showSyncHint {
-                Text("still syncing? open Find My and check that\nyou see friends on the People tab.\nif not, ask a friend to share their location\nwith you first.")
+                Text("taking a while? check that Find My shows\nfriends on the **People** tab. if not, ask a\nfriend to share their location with you first.")
                     .font(.system(size: 12)).foregroundColor(DS.orange)
                     .multilineTextAlignment(.center).lineSpacing(2)
                     .transition(.opacity)
@@ -718,14 +595,6 @@ struct SetupView: View {
 
             ActionButton(title: "open Find My", icon: "location", color: DS.green, style: .outline) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
-            }
-            .padding(.horizontal, 40)
-
-            ActionButton(title: "try again", icon: "arrow.clockwise", color: DS.green, style: .outline) {
-                dataTimer?.invalidate()
-                dataTimer = nil
-                dataPolling = false
-                preflight()
             }
             .padding(.horizontal, 40)
 
@@ -739,7 +608,7 @@ struct SetupView: View {
             startDataPolling()
             // Show hint after 45 seconds if still stuck
             DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
-                if case .fdaGrantedNoData = status {
+                if case .waitingForFindMy = status {
                     withAnimation(.easeIn(duration: 0.3)) { showSyncHint = true }
                 }
             }
