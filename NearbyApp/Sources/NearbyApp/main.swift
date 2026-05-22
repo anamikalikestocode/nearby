@@ -1,10 +1,13 @@
 import AppKit
 import SwiftUI
+import ServiceManagement
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem!
     var setupWindow: NSWindow?
     var scheduler: NSBackgroundActivityScheduler?
+    var backupTimer: Timer?          // backup timer in case NSBackgroundActivityScheduler is deferred
+    var consecutiveFailures = 0      // track check failures for menu bar indicator
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -14,6 +17,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Telemetry.trackAppLaunch()
 
         if AppStateManager.shared.isSetUp {
+            enableLoginItem()
             startScheduler()
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                 AppStateManager.shared.runCheck()
@@ -75,10 +79,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let lastCheck = AppStateManager.shared.lastCheckTime {
                 let ago = Int(Date().timeIntervalSince(lastCheck) / 60)
                 if ago > 30 {
-                    let staleItem = NSMenuItem(title: "Searching... (last check \(ago)m ago)", action: nil, keyEquivalent: "")
+                    let staleItem = NSMenuItem(title: "⚠️ Last check \(ago)m ago — is your Mac awake?", action: nil, keyEquivalent: "")
                     staleItem.isEnabled = false
                     menu.addItem(staleItem)
                 }
+            }
+
+            if consecutiveFailures >= 3 {
+                let failItem = NSMenuItem(title: "⚠️ Checks failing — try Check Now", action: nil, keyEquivalent: "")
+                failItem.isEnabled = false
+                menu.addItem(failItem)
             }
 
             menu.addItem(NSMenuItem.separator())
@@ -150,6 +160,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupWindow = nil
         NSApp.setActivationPolicy(.accessory)
         if AppStateManager.shared.isSetUp {
+            enableLoginItem()
             startScheduler()
             buildMenu()
             updateMenuBarIcon()
@@ -169,12 +180,58 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         s.schedule { [weak self] completion in
             AppStateManager.shared.runCheck()
             DispatchQueue.main.async {
+                self?.trackCheckHealth()
                 self?.buildMenu()
                 self?.updateMenuBarIcon()
             }
             completion(.finished)
         }
         scheduler = s
+
+        // Backup timer — NSBackgroundActivityScheduler can be deferred by macOS
+        // power management. This ensures checks happen at least every 12 minutes.
+        if backupTimer == nil {
+            backupTimer = Timer.scheduledTimer(withTimeInterval: 720, repeats: true) { [weak self] _ in
+                // Only run if the scheduler hasn't fired recently
+                let lastCheck = AppStateManager.shared.lastCheckTime ?? .distantPast
+                if Date().timeIntervalSince(lastCheck) > 660 {
+                    NSLog("nearby: backup timer firing (scheduler was deferred)")
+                    DispatchQueue.global().async {
+                        AppStateManager.shared.runCheck()
+                        DispatchQueue.main.async {
+                            self?.trackCheckHealth()
+                            self?.buildMenu()
+                            self?.updateMenuBarIcon()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Track consecutive check failures and update menu bar icon.
+    func trackCheckHealth() {
+        if let logs = AppStateManager.shared.lastCheckLog.last,
+           logs.contains("📍") || logs.contains("no friends nearby") || logs.contains("🔔") {
+            consecutiveFailures = 0
+        } else {
+            consecutiveFailures += 1
+        }
+    }
+
+    /// Register as login item so the app auto-starts on reboot.
+    func enableLoginItem() {
+        if #available(macOS 13.0, *) {
+            let service = SMAppService.mainApp
+            if service.status != .enabled {
+                do {
+                    try service.register()
+                    NSLog("nearby: registered as login item")
+                } catch {
+                    NSLog("nearby: login item registration failed: %@", error.localizedDescription)
+                }
+            }
+        }
     }
 
     @objc func quit() {

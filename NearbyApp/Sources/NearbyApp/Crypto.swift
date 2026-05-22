@@ -11,26 +11,117 @@ enum CryptoError: Error {
 }
 
 struct Crypto {
-    /// Read the BeaconStore encryption key from the login Keychain.
-    static func readBeaconKey() throws -> Data {
+    /// In-memory cached key — avoids repeated keychain prompts within a single launch.
+    private static var cachedKey: Data?
+
+    // MARK: - Our own keychain entry (never prompts the user)
+
+    private static let ownService = "com.nearby.beaconkey"
+    private static let ownAccount = "cached"
+
+    /// Try reading the key from our own keychain entry (no user prompt).
+    private static func readOwnKeychain() -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "BeaconStore",
-            kSecAttrAccount as String: "BeaconStoreKey",
+            kSecAttrService as String: ownService,
+            kSecAttrAccount as String: ownAccount,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data, !data.isEmpty else { return nil }
+        return data
+    }
+
+    /// Save the key to our own keychain entry so future launches never prompt.
+    private static func saveToOwnKeychain(_ key: Data) {
+        // Delete any existing entry first
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: ownService,
+            kSecAttrAccount as String: ownAccount,
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: ownService,
+            kSecAttrAccount as String: ownAccount,
+            kSecValueData as String: key,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+        ]
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        if status != errSecSuccess {
+            NSLog("nearby: failed to cache key in own keychain: %d", status)
+        }
+    }
+
+    /// Read the BeaconStore encryption key from the login Keychain.
+    ///
+    /// Strategy (eliminates "Allow" vs "Always Allow" friction):
+    ///   1. In-memory cache (fastest, no I/O)
+    ///   2. Our own keychain entry (com.nearby.beaconkey — never prompts)
+    ///   3. Apple's BeaconStore keychain (may prompt user for password)
+    ///   4. On success from step 3, persist to step 2 so future launches are silent
+    static func readBeaconKey() throws -> Data {
+        // 1. In-memory cache
+        if let key = cachedKey { return key }
+
+        // 2. Our own keychain (persisted from a previous launch — no prompt)
+        if let key = readOwnKeychain() {
+            cachedKey = key
+            return key
+        }
+
+        // 3. Apple's BeaconStore (may prompt)
+        //    macOS 12-15: service="BeaconStore", account="BeaconStoreKey" (login keychain)
+        //    macOS 26+:   service="LocalBeaconStore", account="LocalBeaconStoreKey" (system keychain)
+        let keychainVariants: [(String, String)] = [
+            ("BeaconStore", "BeaconStoreKey"),
+            ("LocalBeaconStore", "LocalBeaconStoreKey"),
+        ]
+        var result: AnyObject?
+        var status: OSStatus = errSecItemNotFound
+        for (service, account) in keychainVariants {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecSuccess { break }
+        }
         guard status == errSecSuccess, let data = result as? Data else {
             if status == errSecItemNotFound { throw CryptoError.keyNotFound }
             throw CryptoError.keychainFailed(status)
         }
         // The keychain stores the key as hex string — convert to raw bytes
+        let key: Data
         if let hexString = String(data: data, encoding: .utf8), hexString.count >= 64 {
-            return Data(hexString: hexString) ?? data
+            key = Data(hexString: hexString) ?? data
+        } else {
+            key = data
         }
-        return data
+
+        // 4. Persist to our own keychain so future launches never prompt
+        saveToOwnKeychain(key)
+
+        cachedKey = key
+        return key
+    }
+
+    /// Clear cached key (used if decryption fails — key may have changed after iCloud password reset)
+    static func clearCachedKey() {
+        cachedKey = nil
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: ownService,
+            kSecAttrAccount as String: ownAccount,
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
     }
 
     /// Decrypt a .record plist file and return the parsed dictionary.

@@ -29,10 +29,17 @@ struct LocationCache {
     private static let allBaseDirs: [URL] = {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return [
-            // Primary — where .record files live
+            // Primary — where .record files live (macOS 12-15)
             home.appendingPathComponent("Library/com.apple.icloud.searchpartyd"),
+            // Group container — macOS 14+ alternate path
             home.appendingPathComponent(
                 "Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/Library/Storage"),
+            // macOS 26 (Tahoe) — searchpartyd moved to app group container
+            home.appendingPathComponent(
+                "Library/Group Containers/com.apple.icloud.searchpartyd.container.appGroup"),
+            // macOS 26 — also check directly under the app group (may have nested structure)
+            home.appendingPathComponent(
+                "Library/Group Containers/com.apple.icloud.searchpartyd.container.appGroup/Library/Storage"),
         ]
     }()
 
@@ -45,6 +52,9 @@ struct LocationCache {
             home.appendingPathComponent("Library/Caches/com.apple.findmy.fmfcore"),
             home.appendingPathComponent(
                 "Library/Group Containers/group.com.apple.findmy.findmylocateagent/Library/Application Support"),
+            home.appendingPathComponent("Library/Caches/com.apple.findmy.findmylocateagent"),
+            home.appendingPathComponent(
+                "Library/Group Containers/group.com.apple.findmy.findmylocateagent"),
         ]
     }()
 

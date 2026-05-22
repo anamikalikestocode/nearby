@@ -66,8 +66,21 @@ struct ProximityChecker {
         }
 
         // Get my location — returns nil if GPS data is extremely stale (>3 hours)
-        guard !config.myDeviceId.isEmpty,
-              let myLoc = LocationCache.getMyLocation(deviceId: config.myDeviceId, key: key) else {
+        // If decryption fails, our cached key may be stale (e.g. iCloud password change).
+        // Clear it and retry once from the real BeaconStore keychain.
+        guard !config.myDeviceId.isEmpty else {
+            logs.append("[\(ts)] ⏸ Skipped — no device ID configured")
+            return logs
+        }
+        var myLoc = LocationCache.getMyLocation(deviceId: config.myDeviceId, key: key)
+        if myLoc == nil {
+            // Could be stale cached key — clear and retry
+            Crypto.clearCachedKey()
+            if let freshKey = try? Crypto.readBeaconKey() {
+                myLoc = LocationCache.getMyLocation(deviceId: config.myDeviceId, key: freshKey)
+            }
+        }
+        guard let myLoc = myLoc else {
             logs.append("[\(ts)] ⏸ Skipped — your iPhone GPS is unavailable or over 3 hours old")
             return logs
         }

@@ -10,6 +10,7 @@ enum AppStatus: Equatable {
     case discovering(String)
     case discoveryFailed(String)
     case setup            // phone + friends, single screen
+    case complete         // "you're all set!" — shown briefly before closing
     case done
 
     static func == (lhs: AppStatus, rhs: AppStatus) -> Bool {
@@ -19,6 +20,7 @@ enum AppStatus: Equatable {
              (.connectFindMy, .connectFindMy),
              (.syncing, .syncing),
              (.setup, .setup),
+             (.complete, .complete),
              (.done, .done):
             return true
         case let (.discovering(a), .discovering(b)):
@@ -170,6 +172,8 @@ struct SetupView: View {
                 errorView(reason)
             case .setup:
                 setupView
+            case .complete:
+                completeView
             case .done:
                 EmptyView()
             }
@@ -435,49 +439,41 @@ struct SetupView: View {
                         .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.blue)
                 }
 
-                Text("turn on Nearby")
-                    .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("a Settings window just opened.\nfind **Nearby** in the list and flip its switch **on**.\n\nwe'll continue automatically.")
-                    .font(.system(size: 14)).foregroundColor(DS.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(3)
+                VStack(spacing: 6) {
+                    Text("turn on Nearby")
+                        .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
+                    Text("find **Nearby** in Settings → flip it **on**")
+                        .font(.system(size: 14)).foregroundColor(DS.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
 
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("waiting for permission...")
+                    Text("waiting...")
                         .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textMuted)
                 }
 
                 if showAddHint {
-                    VStack(spacing: 4) {
-                        Text("don't see Nearby in the list?")
-                            .font(.system(size: 13, weight: .medium)).foregroundColor(DS.textSecondary)
-                        Text("scroll to the bottom → click the **+** button →\nfind **Nearby** in your Applications folder → click Open")
-                            .font(.system(size: 13)).foregroundColor(DS.textMuted)
-                            .multilineTextAlignment(.center)
-                            .lineSpacing(3)
-                    }
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    Text("not there? click **+** → Applications → Nearby")
+                        .font(.system(size: 12)).foregroundColor(DS.textMuted)
+                        .multilineTextAlignment(.center)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
                 if showFDARestartHint {
-                    VStack(spacing: 12) {
-                        Text("already turned it on?")
-                            .font(.system(size: 13, weight: .medium)).foregroundColor(DS.orange)
-                        ActionButton(title: "restart nearby", icon: "arrow.clockwise", color: DS.orange, style: .outline) {
-                            relaunchApp()
-                        }
-                        .padding(.horizontal, 24)
+                    ActionButton(title: "restart nearby", icon: "arrow.clockwise", color: DS.orange, style: .outline) {
+                        relaunchApp()
                     }
+                    .padding(.horizontal, 40)
                     .transition(.opacity)
                 } else {
-                    ActionButton(title: "open settings again", icon: "gear", color: DS.blue, style: .outline) {
+                    ActionButton(title: "reopen settings", icon: "gear", color: DS.blue, style: .outline) {
                         let p = Process()
                         p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
                         p.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
                         try? p.run()
                     }
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, 40)
                 }
             }
             Spacer()
@@ -564,12 +560,11 @@ struct SetupView: View {
                 Image(systemName: "checkmark.shield")
                     .font(.system(size: 30, weight: .medium)).foregroundStyle(DS.green)
             }
-            VStack(spacing: 8) {
-                Text("almost there")
+            VStack(spacing: 6) {
+                Text("syncing your friends")
                     .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
-                Text("we opened Find My to sync your friends'\nlocations. this usually takes a few seconds.")
+                Text("this usually takes a few seconds")
                     .font(.system(size: 14)).foregroundColor(DS.textSecondary)
-                    .multilineTextAlignment(.center).lineSpacing(3)
             }
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
@@ -578,23 +573,22 @@ struct SetupView: View {
             }
 
             if showSyncHint {
-                Text("taking a while? check that Find My shows\nfriends on the **People** tab. if not, ask a\nfriend to share their location with you first.")
+                Text("no friends? open **Find My → People**\nand make sure someone shares with you.")
                     .font(.system(size: 12)).foregroundColor(DS.orange)
                     .multilineTextAlignment(.center).lineSpacing(2)
                     .transition(.opacity)
             }
-
-            ActionButton(title: "open Find My", icon: "location", color: DS.green, style: .outline) {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
-            }
-            .padding(.horizontal, 40)
 
             Spacer()
         }
         .padding(32)
         .onAppear {
             showSyncHint = false
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/FindMy.app"))
+            // Launch Find My hidden — just need it running to trigger searchpartyd sync
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            p.arguments = ["-gjb", "com.apple.findmy"]
+            try? p.run()
             startSyncPolling()
             DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
                 if case .syncing = status {
@@ -612,9 +606,44 @@ struct SetupView: View {
             Text(text)
                 .font(.system(size: 16, weight: .medium)).foregroundColor(DS.textPrimary)
             AnimatedProgressBar().padding(.horizontal, 60)
+            if text.contains("friends") {
+                Text("your Mac may ask for your password — tap **Always Allow**")
+                    .font(.system(size: 12)).foregroundColor(DS.textMuted)
+                    .multilineTextAlignment(.center)
+            }
             Spacer()
         }
         .padding(32)
+    }
+
+    // MARK: - Complete
+
+    var completeView: some View {
+        VStack(spacing: 24) {
+            Spacer()
+            Text("\u{1F389}").font(.system(size: 56))
+            VStack(spacing: 8) {
+                Text("you're all set!")
+                    .font(.system(size: 22, weight: .bold)).foregroundColor(DS.textPrimary)
+                Text("your iMessage bot is live")
+                    .font(.system(size: 15, weight: .medium)).foregroundColor(DS.green)
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "menubar.rectangle")
+                    .font(.system(size: 12))
+                Text("nearby lives in your menu bar")
+                    .font(.system(size: 13))
+            }
+            .foregroundColor(DS.textMuted)
+            Spacer()
+        }
+        .padding(32)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                status = .done
+                NSApplication.shared.keyWindow?.close()
+            }
+        }
     }
 
     // MARK: - Error
@@ -715,9 +744,7 @@ struct SetupView: View {
             .opacity(canFinishSetup ? 1 : 0.4)
             .disabled(!canFinishSetup)
 
-            Text("you'll get iMessages when friends are close")
-                .font(.system(size: 12)).foregroundColor(DS.textMuted)
-                .padding(.top, 8).padding(.bottom, 18)
+            Spacer().frame(height: 18)
         }
     }
 
@@ -797,13 +824,16 @@ struct SetupView: View {
         Notifier.requestPermission()
         Telemetry.trackSetup(friendCount: selected.count, radiusMeters: r)
 
-        // Queue a welcome text through Supabase (Anamika's Mac will send it)
-        MessageQueue.enqueue(
-            to: phoneNumber,
-            message: "welcome to nearby! you'll get texts here when friends are close \u{1F44B}"
-        )
+        // Queue a welcome text — but only once per phone number
+        let welcomeKey = "welcomed_\(Notifier.normalizePhone(phoneNumber))"
+        if !UserDefaults.standard.bool(forKey: welcomeKey) {
+            MessageQueue.enqueue(
+                to: phoneNumber,
+                message: "welcome to nearby! you'll get texts here when friends are close \u{1F44B}"
+            )
+            UserDefaults.standard.set(true, forKey: welcomeKey)
+        }
 
-        status = .done
-        NSApplication.shared.keyWindow?.close()
+        status = .complete
     }
 }
