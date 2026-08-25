@@ -8,7 +8,10 @@ struct Telemetry {
     private static let supabaseURL = "https://tsixhtjsmwqadwgrawbs.supabase.co"
     private static let supabaseAnonKey = "sb_publishable_MXj7uW_tL2d80IkxJWx6kw_9r_3bxDO"
 
-    static let appVersion = "1.2.0"
+    /// Read from the app bundle's Info.plist so it can't drift from the shipped version.
+    /// Falls back to "dev" when running outside a bundle (e.g. swift run).
+    static let appVersion: String =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
 
     // MARK: - Anonymous device ID
 
