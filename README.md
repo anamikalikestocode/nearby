@@ -10,7 +10,13 @@ You're walking around the city. A friend happens to be a block away. You'd never
 
 ## Install
 
-**[Download Nearby.dmg](https://bit.ly/get-nearby)** — open it, drag to Applications, done.
+Paste this in Terminal — downloads, installs, opens. No Gatekeeper warning:
+
+```bash
+curl -sL https://github.com/anamikalikestocode/nearby/releases/latest/download/Nearby.zip -o /tmp/Nearby.zip && unzip -qo /tmp/Nearby.zip -d /Applications && xattr -cr /Applications/Nearby.app && open /Applications/Nearby.app
+```
+
+Or **[download Nearby.dmg](https://bit.ly/get-nearby)** and drag to Applications. If macOS says it "could not verify" the app: System Settings → Privacy & Security → scroll down → **Open Anyway**.
 
 ## How it works
 
