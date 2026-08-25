@@ -81,30 +81,75 @@ struct Crypto {
             ("BeaconStore", "BeaconStoreKey"),
             ("LocalBeaconStore", "LocalBeaconStoreKey"),
         ]
-        var result: AnyObject?
-        var status: OSStatus = errSecItemNotFound
+        var data: Data?
+        var lastStatus: OSStatus = errSecItemNotFound
+
         for (service, account) in keychainVariants {
-            let query: [String: Any] = [
+            // First try: read password data (macOS 12-15 stores key here)
+            let dataQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: service,
                 kSecAttrAccount as String: account,
                 kSecReturnData as String: true,
                 kSecMatchLimit as String: kSecMatchLimitOne
             ]
-            status = SecItemCopyMatching(query as CFDictionary, &result)
-            if status == errSecSuccess { break }
+            var result: AnyObject?
+            lastStatus = SecItemCopyMatching(dataQuery as CFDictionary, &result)
+            if lastStatus == errSecSuccess, let d = result as? Data, d.count >= 16 {
+                data = d
+                NSLog("nearby: key from %@/%@ password data (%d bytes)", service, account, d.count)
+                break
+            }
+
+            // Second try: read generic attribute (macOS 26 stores key in kSecAttrGeneric)
+            let attrQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+                kSecReturnAttributes as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            result = nil
+            lastStatus = SecItemCopyMatching(attrQuery as CFDictionary, &result)
+            if lastStatus == errSecSuccess, let attrs = result as? [String: Any],
+               let gena = attrs[kSecAttrGeneric as String] as? Data, gena.count >= 16 {
+                data = gena
+                NSLog("nearby: key from %@/%@ generic attribute (%d bytes)", service, account, gena.count)
+                break
+            }
         }
-        guard status == errSecSuccess, let data = result as? Data else {
-            if status == errSecItemNotFound { throw CryptoError.keyNotFound }
-            throw CryptoError.keychainFailed(status)
+
+        guard let data = data else {
+            if lastStatus == errSecItemNotFound { throw CryptoError.keyNotFound }
+            throw CryptoError.keychainFailed(lastStatus)
         }
-        // The keychain stores the key as hex string — convert to raw bytes
+
+        // The keychain may store the key in different formats across macOS versions:
+        //   macOS 12-15 (BeaconStore): hex string like "8bddc99f..." (64+ chars → 32 bytes)
+        //   macOS 26 (LocalBeaconStore): may be raw 32 bytes, or hex, or base64
         let key: Data
-        if let hexString = String(data: data, encoding: .utf8), hexString.count >= 64 {
-            key = Data(hexString: hexString) ?? data
+        if data.count == 32 {
+            // Already raw 32 bytes (AES-256 key) — use directly
+            key = data
+        } else if let hexString = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  hexString.count >= 64,
+                  let hexKey = Data(hexString: hexString) {
+            // Hex-encoded string → decode to raw bytes
+            key = hexKey
+        } else if data.count == 64, let hexString = String(data: data, encoding: .utf8),
+                  let hexKey = Data(hexString: hexString) {
+            // Exactly 64 bytes of ASCII hex
+            key = hexKey
         } else {
+            // Unknown format — use as-is and hope for the best
             key = data
         }
+
+        NSLog("nearby: beacon key read — raw size=%d, interpreted key size=%d bytes, first4=%@",
+              data.count, key.count, key.prefix(4).map { String(format: "%02x", $0) }.joined())
+
+        // Keep raw data for fallback decryption attempts
+        rawKeychainData = data
 
         // 4. Persist to our own keychain so future launches never prompt
         saveToOwnKeychain(key)
@@ -124,7 +169,11 @@ struct Crypto {
         SecItemDelete(deleteQuery as CFDictionary)
     }
 
+    /// The raw keychain data before interpretation — kept for fallback attempts.
+    static var rawKeychainData: Data?
+
     /// Decrypt a .record plist file and return the parsed dictionary.
+    /// If the primary key fails, tries alternate interpretations of the raw keychain data.
     static func decryptRecord(recordPath: URL, key: Data) throws -> [String: Any] {
         let data = try Data(contentsOf: recordPath)
         guard let plist = try PropertyListSerialization.propertyList(
@@ -137,14 +186,34 @@ struct Crypto {
         let tag = plist[1]
         let ciphertext = plist[2]
 
-        let plaintext = try decryptAESGCM(key: key, nonce: nonce, ciphertext: ciphertext, tag: tag)
-
-        guard let parsed = try PropertyListSerialization.propertyList(
-            from: plaintext, options: [], format: nil
-        ) as? [String: Any] else {
-            throw CryptoError.decryptionFailed
+        // Try primary key first
+        if let plaintext = try? decryptAESGCM(key: key, nonce: nonce, ciphertext: ciphertext, tag: tag),
+           let parsed = try? PropertyListSerialization.propertyList(from: plaintext, options: [], format: nil) as? [String: Any] {
+            return parsed
         }
-        return parsed
+
+        // If primary key failed and we have raw keychain data, try alternate interpretations
+        if let raw = rawKeychainData, raw != key {
+            // Try raw data directly
+            if let plaintext = try? decryptAESGCM(key: raw, nonce: nonce, ciphertext: ciphertext, tag: tag),
+               let parsed = try? PropertyListSerialization.propertyList(from: plaintext, options: [], format: nil) as? [String: Any] {
+                NSLog("nearby: fallback key (raw) worked for %@", recordPath.lastPathComponent)
+                return parsed
+            }
+
+            // Try hex-decoding the raw data
+            if let hexStr = String(data: raw, encoding: .utf8),
+               let hexKey = Data(hexString: hexStr),
+               hexKey != key {
+                if let plaintext = try? decryptAESGCM(key: hexKey, nonce: nonce, ciphertext: ciphertext, tag: tag),
+                   let parsed = try? PropertyListSerialization.propertyList(from: plaintext, options: [], format: nil) as? [String: Any] {
+                    NSLog("nearby: fallback key (hex-decoded) worked for %@", recordPath.lastPathComponent)
+                    return parsed
+                }
+            }
+        }
+
+        throw CryptoError.decryptionFailed
     }
 
     /// AES-256-GCM decryption supporting any nonce size.

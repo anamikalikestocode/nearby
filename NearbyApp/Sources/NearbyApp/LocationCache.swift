@@ -283,9 +283,20 @@ struct LocationCache {
             return friends
         }
 
-        NSLog("nearby: found %d shared key records across all paths", records.count)
+        NSLog("nearby: found %d shared key records across all paths, key size=%d bytes", records.count, key.count)
+        var decryptOK = 0
+        var decryptFail = 0
         for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            guard let parsed = try? Crypto.decryptRecord(recordPath: record, key: key) else { continue }
+            guard let parsed: [String: Any] = {
+                do {
+                    return try Crypto.decryptRecord(recordPath: record, key: key)
+                } catch {
+                    decryptFail += 1
+                    NSLog("nearby: decrypt failed for %@: %@", record.lastPathComponent, error.localizedDescription)
+                    return nil
+                }
+            }() else { continue }
+            decryptOK += 1
             guard let fmid = parsed["findMyId"] as? String,
                   !seenIds.contains(fmid),
                   let ownerHandle = parsed["ownerHandle"] as? [String: Any],
@@ -322,6 +333,7 @@ struct LocationCache {
 
             friends.append(FriendInfo(findMyId: fmid, name: name, email: contact))
         }
+        NSLog("nearby: discovery result — %d decrypted, %d failed, %d friends found", decryptOK, decryptFail, friends.count)
         return friends
     }
 

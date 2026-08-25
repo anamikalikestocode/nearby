@@ -146,20 +146,16 @@ class AppStateManager: ObservableObject {
             $0.bundleIdentifier == "com.apple.findmy"
         }
 
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = false           // don't bring Find My to front
-        config.addsToRecentItems = false
-
-        let sem = DispatchSemaphore(value: 0)
-        var launchFailed = false
-        NSWorkspace.shared.openApplication(at: findMyURL, configuration: config) { _, error in
-            if error != nil { launchFailed = true }
-            sem.signal()
-        }
-        // Timeout after 10 seconds — don't block forever if Find My can't launch
-        let result = sem.wait(timeout: .now() + 10)
-        if result == .timedOut || launchFailed {
-            NSLog("nearby: Find My launch timed out or failed — skipping refresh")
+        // Launch Find My fully hidden — `open -gjb` keeps it out of the Dock
+        // and invisible. NSWorkspace.activates=false still flashes on some macOS versions.
+        let launcher = Process()
+        launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        launcher.arguments = ["-gjb", "com.apple.findmy"]
+        do {
+            try launcher.run()
+            launcher.waitUntilExit()
+        } catch {
+            NSLog("nearby: Find My launch failed: %@", error.localizedDescription)
             return
         }
 
