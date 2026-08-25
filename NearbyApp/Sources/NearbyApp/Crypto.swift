@@ -151,11 +151,39 @@ struct Crypto {
         // Keep raw data for fallback decryption attempts
         rawKeychainData = data
 
-        // 4. Persist to our own keychain so future launches never prompt
-        saveToOwnKeychain(key)
-
+        // NOTE: we deliberately do NOT persist to our own keychain here.
+        // The interpretation above is a guess — persisting an unvalidated key
+        // meant a wrong guess got cached forever and every later launch failed
+        // silently. noteDecryptSuccess() persists the key once it has actually
+        // decrypted a record.
         cachedKey = key
         return key
+    }
+
+    /// Whether we've persisted a proven-working key this launch.
+    private static var persistedValidatedKey = false
+
+    /// Called when a key successfully decrypts a record. Persists it to our own
+    /// keychain (once per launch) so future launches never prompt — and if a
+    /// fallback interpretation was the one that worked, this self-heals the cache.
+    static func noteDecryptSuccess(_ key: Data) {
+        guard !persistedValidatedKey else { return }
+        persistedValidatedKey = true
+        cachedKey = key
+        saveToOwnKeychain(key)
+    }
+
+    private static var didClearOnce = false
+
+    /// Clear the cached key at most once per launch. Used when every record fails
+    /// to decrypt (stale cached key from a previous launch) — the next
+    /// readBeaconKey() re-reads Apple's BeaconStore. Once-per-launch so a polling
+    /// loop can't trigger repeated keychain password prompts.
+    static func clearCachedKeyOnce() -> Bool {
+        guard !didClearOnce else { return false }
+        didClearOnce = true
+        clearCachedKey()
+        return true
     }
 
     /// Clear cached key (used if decryption fails — key may have changed after iCloud password reset)
@@ -189,6 +217,7 @@ struct Crypto {
         // Try primary key first
         if let plaintext = try? decryptAESGCM(key: key, nonce: nonce, ciphertext: ciphertext, tag: tag),
            let parsed = try? PropertyListSerialization.propertyList(from: plaintext, options: [], format: nil) as? [String: Any] {
+            noteDecryptSuccess(key)
             return parsed
         }
 
@@ -198,6 +227,7 @@ struct Crypto {
             if let plaintext = try? decryptAESGCM(key: raw, nonce: nonce, ciphertext: ciphertext, tag: tag),
                let parsed = try? PropertyListSerialization.propertyList(from: plaintext, options: [], format: nil) as? [String: Any] {
                 NSLog("nearby: fallback key (raw) worked for %@", recordPath.lastPathComponent)
+                noteDecryptSuccess(raw)
                 return parsed
             }
 
@@ -208,6 +238,7 @@ struct Crypto {
                 if let plaintext = try? decryptAESGCM(key: hexKey, nonce: nonce, ciphertext: ciphertext, tag: tag),
                    let parsed = try? PropertyListSerialization.propertyList(from: plaintext, options: [], format: nil) as? [String: Any] {
                     NSLog("nearby: fallback key (hex-decoded) worked for %@", recordPath.lastPathComponent)
+                    noteDecryptSuccess(hexKey)
                     return parsed
                 }
             }

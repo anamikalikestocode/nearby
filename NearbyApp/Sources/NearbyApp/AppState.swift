@@ -153,9 +153,19 @@ class AppStateManager: ObservableObject {
         launcher.arguments = ["-gjb", "com.apple.findmy"]
         do {
             try launcher.run()
-            launcher.waitUntilExit()
         } catch {
             NSLog("nearby: Find My launch failed: %@", error.localizedDescription)
+            return
+        }
+        // `open` normally returns in well under a second — but don't block the
+        // check thread forever if it hangs. 10s timeout, then bail.
+        let deadline = Date().addingTimeInterval(10)
+        while launcher.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        if launcher.isRunning {
+            launcher.terminate()
+            NSLog("nearby: Find My launch timed out — skipping refresh")
             return
         }
 

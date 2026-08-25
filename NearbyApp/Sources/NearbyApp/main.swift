@@ -210,9 +210,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// Track consecutive check failures and update menu bar icon.
+    /// A check is healthy if any line shows we read our own GPS (📍) — every
+    /// successful check starts with that line. Only checking the LAST line was
+    /// wrong: healthy checks often end with ⏱/📱/⏳ lines and were counted as failures.
     func trackCheckHealth() {
-        if let logs = AppStateManager.shared.lastCheckLog.last,
-           logs.contains("📍") || logs.contains("no friends nearby") || logs.contains("🔔") {
+        if AppStateManager.shared.lastCheckLog.contains(where: { $0.contains("📍") }) {
             consecutiveFailures = 0
         } else {
             consecutiveFailures += 1

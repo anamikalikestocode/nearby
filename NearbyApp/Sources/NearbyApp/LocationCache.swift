@@ -334,6 +334,16 @@ struct LocationCache {
             friends.append(FriendInfo(findMyId: fmid, name: name, email: contact))
         }
         NSLog("nearby: discovery result — %d decrypted, %d failed, %d friends found", decryptOK, decryptFail, friends.count)
+
+        // Every record failed to decrypt — the cached key is likely stale
+        // (e.g. persisted from an old launch, or iCloud password changed).
+        // Clear it (once per launch) so the next attempt re-reads Apple's
+        // BeaconStore instead of retrying the same bad key forever.
+        if decryptOK == 0 && decryptFail > 0 {
+            if Crypto.clearCachedKeyOnce() {
+                NSLog("nearby: all decrypts failed — cleared cached key, will re-read BeaconStore")
+            }
+        }
         return friends
     }
 
