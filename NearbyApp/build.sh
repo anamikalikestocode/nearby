@@ -15,6 +15,25 @@ codesign --force --deep --options runtime \
     --entitlements Nearby.entitlements \
     -s "Developer ID Application: Anamika Bhoyrul (98F3BWXPZ2)" Nearby.app
 
+# ---------- Notarization ----------
+# Requires a one-time credential setup:
+#   xcrun notarytool store-credentials nearby --apple-id YOUR_APPLE_ID --team-id 98F3BWXPZ2
+# Without it, Gatekeeper on macOS 15+ blocks the downloaded app with
+# "Apple could not verify" and users must approve it in System Settings.
+if xcrun notarytool history --keychain-profile nearby > /dev/null 2>&1; then
+    echo "Notarizing (this can take a few minutes)..."
+    ditto -c -k --keepParent Nearby.app /tmp/nearby-notarize.zip
+    xcrun notarytool submit /tmp/nearby-notarize.zip \
+        --keychain-profile nearby --wait
+    rm -f /tmp/nearby-notarize.zip
+    echo "Stapling ticket..."
+    xcrun stapler staple Nearby.app
+else
+    echo "⚠️  Skipping notarization — no 'nearby' keychain profile found."
+    echo "   Users on macOS 15+ will hit a Gatekeeper warning. To fix, run:"
+    echo "   xcrun notarytool store-credentials nearby --apple-id YOUR_APPLE_ID --team-id 98F3BWXPZ2"
+fi
+
 # ---------- DMG ----------
 echo "Creating DMG..."
 DMG_NAME="Nearby"
